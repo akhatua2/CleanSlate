@@ -1,0 +1,27 @@
+[project]
+name = "cleanslate"
+version = "0.1.0"
+description = "Calculate probability of model outputs given seed tokens"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "transformers",
+    "accelerate",
+]
+
+[project.optional-dependencies]
+vllm = ["vllm"]
+cli = ["typer", "rich"]
+
+[project.scripts]
+cleanslate = "cleanslate.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 88
+
+[tool.mypy]
+strict = true
