@@ -4,7 +4,7 @@ import torch
 from torch.nn import functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .base import InferenceBackend, ProbabilityResult
+from .base import GenerationResult, InferenceBackend, ProbabilityResult
 
 
 class HuggingFaceBackend(InferenceBackend):
@@ -289,3 +289,220 @@ class HuggingFaceBackend(InferenceBackend):
             predicted_tokens=predicted_tokens,
             decoding_options=decoding_options or None,
         )
+
+    @torch.no_grad()
+    def generate(
+        self,
+        seed: str,
+        max_new_tokens: int = 128,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        capture_top_k: int = 50,
+    ) -> GenerationResult:
+        """
+        Generate text from seed and capture token-level probabilities.
+        
+        Uses HuggingFace generate() with output_scores=True to capture logits
+        at each generation step.
+        """
+        import time
+        
+        start_time = time.perf_counter()
+        
+        # Tokenize seed
+        inputs = self.tokenizer(seed, return_tensors="pt").to(self._device)
+        seed_length = inputs.input_ids.shape[1]
+        
+        # Build generation kwargs
+        gen_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": do_sample,
+            "output_scores": True,
+            "return_dict_in_generate": True,
+            "pad_token_id": self.tokenizer.eos_token_id,
+            "attention_mask": inputs.attention_mask,
+        }
+        
+        if temperature != 1.0:
+            gen_kwargs["temperature"] = temperature
+        if top_k is not None:
+            gen_kwargs["top_k"] = top_k
+        if top_p is not None:
+            gen_kwargs["top_p"] = top_p
+            
+        # Generate
+        outputs = self.model.generate(inputs.input_ids, **gen_kwargs)
+        
+        generation_time_ms = (time.perf_counter() - start_time) * 1000
+        
+        # Extract generated token IDs (excluding seed)
+        generated_ids = outputs.sequences[0, seed_length:].tolist()
+        
+        # Decode tokens
+        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        generated_tokens = [self.tokenizer.decode([tid]) for tid in generated_ids]
+        
+        # Process scores (logits at each generation step)
+        # outputs.scores is a tuple of tensors, one per generated token
+        # Each tensor is [batch_size, vocab_size]
+        token_log_probs: list[float] = []
+        top_k_tokens: list[list[int]] = []
+        top_k_probs: list[list[float]] = []
+        
+        for i, (token_id, score) in enumerate(zip(generated_ids, outputs.scores)):
+            # Apply temperature if not already applied (depends on HF version)
+            # scores from generate() are pre-softmax logits
+            logits = score[0]  # [vocab_size]
+            
+            # Compute log probs
+            log_probs = F.log_softmax(logits, dim=-1)
+            
+            # Get log prob for the actually generated token
+            token_log_probs.append(log_probs[token_id].item())
+            
+            # Get top-k tokens and their log probs
+            topk_vals, topk_ids = torch.topk(log_probs, min(capture_top_k, log_probs.size(-1)))
+            top_k_tokens.append(topk_ids.tolist())
+            top_k_probs.append(topk_vals.tolist())
+        
+        return GenerationResult(
+            generated_text=generated_text,
+            generated_token_ids=generated_ids,
+            generated_tokens=generated_tokens,
+            token_log_probs=token_log_probs,
+            top_k_tokens=top_k_tokens,
+            top_k_probs=top_k_probs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            do_sample=do_sample,
+            generation_time_ms=generation_time_ms,
+        )
+
+    @torch.no_grad()
+    def generate_batch(
+        self,
+        seeds: list[str],
+        max_new_tokens: int = 128,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        capture_top_k: int = 50,
+    ) -> list[GenerationResult]:
+        """
+        Generate text from multiple seeds in a single batched forward pass.
+        
+        Much faster than sequential generation on GPU.
+        """
+        import time
+        
+        if len(seeds) == 0:
+            return []
+        
+        start_time = time.perf_counter()
+        
+        # Tokenize all seeds with padding (left padding for generation)
+        # Left padding is required for batched generation
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        inputs = self.tokenizer(
+            seeds,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+        ).to(self._device)
+        
+        # Track seed lengths (without padding) for each sequence
+        attention_mask = inputs.attention_mask
+        seed_lengths = attention_mask.sum(dim=1).tolist()  # Actual token counts per seed
+        
+        # Build generation kwargs
+        gen_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": do_sample,
+            "output_scores": True,
+            "return_dict_in_generate": True,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "attention_mask": attention_mask,
+        }
+        
+        if temperature != 1.0:
+            gen_kwargs["temperature"] = temperature
+        if top_k is not None:
+            gen_kwargs["top_k"] = top_k
+        if top_p is not None:
+            gen_kwargs["top_p"] = top_p
+        
+        # Generate batch
+        outputs = self.model.generate(inputs.input_ids, **gen_kwargs)
+        
+        generation_time_ms = (time.perf_counter() - start_time) * 1000
+        time_per_seq = generation_time_ms / len(seeds)
+        
+        # Process each sequence in the batch
+        results: list[GenerationResult] = []
+        batch_size = len(seeds)
+        input_length = inputs.input_ids.shape[1]  # Padded length
+        
+        for batch_idx in range(batch_size):
+            # Generated IDs start after the padded input
+            # outputs.sequences is [batch_size, input_len + generated_len]
+            full_seq = outputs.sequences[batch_idx]
+            generated_ids = full_seq[input_length:].tolist()
+            
+            # Remove any trailing pad tokens
+            while generated_ids and generated_ids[-1] == self.tokenizer.pad_token_id:
+                generated_ids.pop()
+            
+            # Decode tokens
+            generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            generated_tokens = [self.tokenizer.decode([tid]) for tid in generated_ids]
+            
+            # Process scores for this batch element
+            # outputs.scores is tuple of [batch_size, vocab_size] tensors
+            token_log_probs: list[float] = []
+            top_k_tokens_list: list[list[int]] = []
+            top_k_probs_list: list[list[float]] = []
+            
+            for step_idx, token_id in enumerate(generated_ids):
+                if step_idx >= len(outputs.scores):
+                    break
+                    
+                score = outputs.scores[step_idx]  # [batch_size, vocab_size]
+                logits = score[batch_idx]  # [vocab_size]
+                
+                # Compute log probs
+                log_probs = F.log_softmax(logits, dim=-1)
+                
+                # Get log prob for the actually generated token
+                token_log_probs.append(log_probs[token_id].item())
+                
+                # Get top-k tokens and their log probs
+                topk_vals, topk_ids = torch.topk(
+                    log_probs, min(capture_top_k, log_probs.size(-1))
+                )
+                top_k_tokens_list.append(topk_ids.tolist())
+                top_k_probs_list.append(topk_vals.tolist())
+            
+            results.append(GenerationResult(
+                generated_text=generated_text,
+                generated_token_ids=generated_ids,
+                generated_tokens=generated_tokens,
+                token_log_probs=token_log_probs,
+                top_k_tokens=top_k_tokens_list,
+                top_k_probs=top_k_probs_list,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                do_sample=do_sample,
+                generation_time_ms=time_per_seq,
+            ))
+        
+        return results

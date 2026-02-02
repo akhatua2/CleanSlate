@@ -1,7 +1,36 @@
 """Abstract base class for inference backends."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class GenerationResult:
+    """Result of a text generation with captured logits.
+    
+    Designed for HuggingFace parquet-compatible output.
+    Each instance represents one generation for one seed.
+    """
+    
+    # Generation output
+    generated_text: str
+    generated_token_ids: list[int]
+    generated_tokens: list[str]
+    
+    # Token-level probability data
+    token_log_probs: list[float]  # Log prob of each generated token
+    top_k_tokens: list[list[int]] = field(default_factory=list)  # Top-K token IDs per position
+    top_k_probs: list[list[float]] = field(default_factory=list)  # Top-K log probs per position
+    
+    # Generation parameters (for reproducibility)
+    max_new_tokens: int = 0
+    temperature: float = 1.0
+    top_p: float | None = None
+    top_k: int | None = None
+    do_sample: bool = True
+    
+    # Timing
+    generation_time_ms: float = 0.0
 
 
 @dataclass
@@ -107,3 +136,65 @@ class InferenceBackend(ABC):
         Default implementation just loops. Backends can override for efficiency.
         """
         return [self.compute(seed, target, **decoding_options) for seed, target in pairs]
+
+    @abstractmethod
+    def generate(
+        self,
+        seed: str,
+        max_new_tokens: int = 128,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        capture_top_k: int = 50,
+    ) -> GenerationResult:
+        """
+        Generate text from seed and capture token-level probabilities.
+        
+        Args:
+            seed: The prefix/prompt text
+            max_new_tokens: Maximum number of tokens to generate
+            temperature: Sampling temperature (higher = more random)
+            top_k: Top-k filtering for sampling
+            top_p: Nucleus sampling threshold
+            do_sample: Whether to sample (vs greedy decode)
+            capture_top_k: Number of top tokens/probs to capture per position
+            
+        Returns:
+            GenerationResult with generated text and probability data
+        """
+        pass
+
+    def generate_batch(
+        self,
+        seeds: list[str],
+        max_new_tokens: int = 128,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        capture_top_k: int = 50,
+    ) -> list[GenerationResult]:
+        """
+        Generate text from multiple seeds in a batch.
+        
+        Default implementation loops. Backends can override for efficiency.
+        
+        Args:
+            seeds: List of prefix/prompt texts
+            max_new_tokens: Maximum number of tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k filtering for sampling
+            top_p: Nucleus sampling threshold
+            do_sample: Whether to sample (vs greedy decode)
+            capture_top_k: Number of top tokens/probs to capture per position
+            
+        Returns:
+            List of GenerationResult, one per seed
+        """
+        return [
+            self.generate(
+                seed, max_new_tokens, temperature, top_k, top_p, do_sample, capture_top_k
+            )
+            for seed in seeds
+        ]
