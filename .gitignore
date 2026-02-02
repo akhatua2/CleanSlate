@@ -14,3 +14,4 @@ venv/
 .mypy_cache/
 
 results/
+data/
