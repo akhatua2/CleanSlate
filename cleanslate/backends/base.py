@@ -6,13 +6,26 @@ from dataclasses import dataclass
 
 @dataclass
 class ProbabilityResult:
-    """Result of a probability computation."""
+    """Result of a probability computation.
+    
+    Decoding options (passed via **kwargs) affect how probabilities are computed:
+    
+    - temperature: Scales logits before softmax. Higher = more uniform distribution,
+                   lower = more peaked. Default 1.0 = no scaling.
+    - top_k: Only consider top-k tokens at each position. If target token is outside
+             top-k, its probability is 0 (log_prob = -inf). None = consider all tokens.
+    - top_p: (future) Nucleus sampling threshold.
+    - etc.
+    """
 
     log_prob: float  # Total log probability: sum of log P(token_i | context)
     perplexity: float  # exp(-log_prob / num_tokens)
     num_tokens: int  # Number of target tokens
     token_log_probs: list[float]  # Per-token log probabilities
     token_ranks: list[int] | None = None  # Rank of each target token (1 = top choice)
+    target_tokens: list[str] | None = None  # Decoded target tokens
+    predicted_tokens: list[str] | None = None  # Model's top-1 predictions
+    decoding_options: dict | None = None  # Options used (temperature, top_k, etc.)
 
     @property
     def avg_log_prob(self) -> float:
@@ -60,23 +73,37 @@ class InferenceBackend(ABC):
         pass
 
     @abstractmethod
-    def compute(self, seed: str, target: str) -> ProbabilityResult:
+    def compute(
+        self,
+        seed: str,
+        target: str,
+        **decoding_options,
+    ) -> ProbabilityResult:
         """
-        Compute P(target | seed).
+        Compute P(target | seed) under a given decoding scheme.
 
         Args:
             seed: The prefix/prompt text
             target: The continuation text whose probability we want
+            **decoding_options: Decoding parameters (backend-specific):
+                - temperature (float): Logit scaling. Higher = flatter. Default 1.0.
+                - top_k (int): Only consider top-k tokens. Default None (all).
+                - top_p (float): Nucleus sampling threshold. Default None (disabled).
+                - repetition_penalty (float): Penalize repeated tokens. Default 1.0.
 
         Returns:
             ProbabilityResult with log probability, perplexity, etc.
         """
         pass
 
-    def compute_batch(self, pairs: list[tuple[str, str]]) -> list[ProbabilityResult]:
+    def compute_batch(
+        self,
+        pairs: list[tuple[str, str]],
+        **decoding_options,
+    ) -> list[ProbabilityResult]:
         """
         Compute probabilities for multiple (seed, target) pairs.
 
         Default implementation just loops. Backends can override for efficiency.
         """
-        return [self.compute(seed, target) for seed, target in pairs]
+        return [self.compute(seed, target, **decoding_options) for seed, target in pairs]

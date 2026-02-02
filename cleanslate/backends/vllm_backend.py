@@ -25,5 +25,10 @@ class VLLMBackend(InferenceBackend):
     def model_name(self) -> str:
         raise NotImplementedError
 
-    def compute(self, seed: str, target: str) -> ProbabilityResult:
+    def compute(
+        self,
+        seed: str,
+        target: str,
+        **decoding_options,
+    ) -> ProbabilityResult:
         raise NotImplementedError

@@ -5,7 +5,14 @@ from typing import Literal
 
 from .backends.base import InferenceBackend
 from .backends.huggingface import HuggingFaceBackend
+from .metrics import BLEU1, ROUGE1, ROUGEL
 from .results import ExperimentResults, SampleResult
+
+
+# Initialize metrics once
+_bleu1 = BLEU1()
+_rouge1 = ROUGE1()
+_rouge_l = ROUGEL()
 
 
 BackendType = Literal["huggingface", "vllm"]
@@ -81,6 +88,13 @@ class Experiment:
 
             result = estimator.compute(seed, target)
 
+            # Compute n-gram metrics
+            target_toks = result.target_tokens or []
+            pred_toks = result.predicted_tokens or []
+            bleu_1 = _bleu1.compute(pred_toks, target_toks).score if target_toks else 0.0
+            rouge_1 = _rouge1.compute(pred_toks, target_toks).score if target_toks else 0.0
+            rouge_l = _rouge_l.compute(pred_toks, target_toks).score if target_toks else 0.0
+
             sample_results.append(
                 SampleResult(
                     name=name,
@@ -93,6 +107,11 @@ class Experiment:
                     avg_rank=result.avg_rank,
                     token_log_probs=result.token_log_probs,
                     token_ranks=result.token_ranks or [],
+                    target_tokens=target_toks,
+                    predicted_tokens=pred_toks,
+                    bleu_1=bleu_1,
+                    rouge_1=rouge_1,
+                    rouge_l=rouge_l,
                 )
             )
 
@@ -109,6 +128,13 @@ class Experiment:
         estimator = self._get_estimator()
         result = estimator.compute(seed, target)
 
+        # Compute n-gram metrics
+        target_toks = result.target_tokens or []
+        pred_toks = result.predicted_tokens or []
+        bleu_1 = _bleu1.compute(pred_toks, target_toks).score if target_toks else 0.0
+        rouge_1 = _rouge1.compute(pred_toks, target_toks).score if target_toks else 0.0
+        rouge_l = _rouge_l.compute(pred_toks, target_toks).score if target_toks else 0.0
+
         return SampleResult(
             name=name,
             seed=seed,
@@ -120,6 +146,11 @@ class Experiment:
             avg_rank=result.avg_rank,
             token_log_probs=result.token_log_probs,
             token_ranks=result.token_ranks or [],
+            target_tokens=target_toks,
+            predicted_tokens=pred_toks,
+            bleu_1=bleu_1,
+            rouge_1=rouge_1,
+            rouge_l=rouge_l,
         )
 
     def compare_targets(

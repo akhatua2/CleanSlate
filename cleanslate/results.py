@@ -19,6 +19,12 @@ class SampleResult:
     avg_rank: float
     token_log_probs: list[float] = field(default_factory=list)
     token_ranks: list[int] = field(default_factory=list)
+    target_tokens: list[str] = field(default_factory=list)
+    predicted_tokens: list[str] = field(default_factory=list)
+    # N-gram metrics
+    bleu_1: float = 0.0
+    rouge_1: float = 0.0
+    rouge_l: float = 0.0
 
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict."""
@@ -26,7 +32,35 @@ class SampleResult:
 
     @classmethod
     def from_dict(cls, d: dict) -> "SampleResult":
+        # Handle older results without new fields
+        d.setdefault("target_tokens", [])
+        d.setdefault("predicted_tokens", [])
+        d.setdefault("bleu_1", 0.0)
+        d.setdefault("rouge_1", 0.0)
+        d.setdefault("rouge_l", 0.0)
         return cls(**d)
+
+    def token_diff_table(self) -> str:
+        """Generate a token-by-token diff table."""
+        if not self.target_tokens or not self.predicted_tokens:
+            return "No token data available."
+
+        lines = []
+        lines.append(f"{'Pos':>4} │ {'Target':<15} │ {'Predicted':<15} │ {'Rank':>5} │ Match")
+        lines.append("─" * 60)
+
+        for i, (tgt, pred, rank) in enumerate(
+            zip(self.target_tokens, self.predicted_tokens, self.token_ranks)
+        ):
+            match = "✓" if rank == 1 else "✗"
+            # Escape/repr for visibility of whitespace
+            tgt_display = repr(tgt)[1:-1][:15]
+            pred_display = repr(pred)[1:-1][:15]
+            lines.append(
+                f"{i + 1:>4} │ {tgt_display:<15} │ {pred_display:<15} │ {rank:>5} │ {match}"
+            )
+
+        return "\n".join(lines)
 
 
 @dataclass
@@ -44,22 +78,21 @@ class ExperimentResults:
     mean_perplexity: float = 0.0
     mean_rank_1_fraction: float = 0.0
     mean_avg_rank: float = 0.0
+    mean_bleu_1: float = 0.0
+    mean_rouge_1: float = 0.0
+    mean_rouge_l: float = 0.0
 
     def __post_init__(self):
         """Compute aggregate statistics."""
         if self.samples:
-            self.mean_log_likelihood = sum(
-                s.log_likelihood for s in self.samples
-            ) / len(self.samples)
-            self.mean_perplexity = sum(s.perplexity for s in self.samples) / len(
-                self.samples
-            )
-            self.mean_rank_1_fraction = sum(
-                s.rank_1_fraction for s in self.samples
-            ) / len(self.samples)
-            self.mean_avg_rank = sum(s.avg_rank for s in self.samples) / len(
-                self.samples
-            )
+            n = len(self.samples)
+            self.mean_log_likelihood = sum(s.log_likelihood for s in self.samples) / n
+            self.mean_perplexity = sum(s.perplexity for s in self.samples) / n
+            self.mean_rank_1_fraction = sum(s.rank_1_fraction for s in self.samples) / n
+            self.mean_avg_rank = sum(s.avg_rank for s in self.samples) / n
+            self.mean_bleu_1 = sum(s.bleu_1 for s in self.samples) / n
+            self.mean_rouge_1 = sum(s.rouge_1 for s in self.samples) / n
+            self.mean_rouge_l = sum(s.rouge_l for s in self.samples) / n
 
     def summary(self, show_tokens: bool = False) -> str:
         """Generate a formatted summary table."""
@@ -77,26 +110,26 @@ class ExperimentResults:
         name_w = max(30, max((len(s.name[:30]) for s in self.samples), default=10))
 
         # Table header
-        header = f"{'Sample':<{name_w}} │ {'Log-Lik':>10} │ {'PPL':>8} │ {'Rank-1':>8} │ {'AvgRank':>8}"
+        header = f"{'Sample':<{name_w}} │ {'Log-Lik':>9} │ {'PPL':>7} │ {'Rank-1':>6} │ {'AvgRank':>7} │ {'BLEU-1':>6} │ {'ROUGE-1':>7} │ {'ROUGE-L':>7}"
         if show_tokens:
-            header += f" │ {'Tokens':>6}"
+            header += f" │ {'Tok':>4}"
         lines.append("─" * len(header))
         lines.append(header)
         lines.append("─" * len(header))
 
         # Rows
         for s in self.samples:
-            row = f"{s.name[:name_w]:<{name_w}} │ {s.log_likelihood:>10.2f} │ {s.perplexity:>8.2f} │ {s.rank_1_fraction:>7.1%} │ {s.avg_rank:>8.1f}"
+            row = f"{s.name[:name_w]:<{name_w}} │ {s.log_likelihood:>9.2f} │ {s.perplexity:>7.1f} │ {s.rank_1_fraction:>5.0%} │ {s.avg_rank:>7.1f} │ {s.bleu_1:>6.2f} │ {s.rouge_1:>7.2f} │ {s.rouge_l:>7.2f}"
             if show_tokens:
-                row += f" │ {s.num_tokens:>6}"
+                row += f" │ {s.num_tokens:>4}"
             lines.append(row)
 
         # Summary row
         lines.append("─" * len(header))
-        summary_row = f"{'MEAN':<{name_w}} │ {self.mean_log_likelihood:>10.2f} │ {self.mean_perplexity:>8.2f} │ {self.mean_rank_1_fraction:>7.1%} │ {self.mean_avg_rank:>8.1f}"
+        summary_row = f"{'MEAN':<{name_w}} │ {self.mean_log_likelihood:>9.2f} │ {self.mean_perplexity:>7.1f} │ {self.mean_rank_1_fraction:>5.0%} │ {self.mean_avg_rank:>7.1f} │ {self.mean_bleu_1:>6.2f} │ {self.mean_rouge_1:>7.2f} │ {self.mean_rouge_l:>7.2f}"
         if show_tokens:
             total_tokens = sum(s.num_tokens for s in self.samples)
-            summary_row += f" │ {total_tokens:>6}"
+            summary_row += f" │ {total_tokens:>4}"
         lines.append(summary_row)
         lines.append("─" * len(header))
 
@@ -113,6 +146,9 @@ class ExperimentResults:
             "mean_perplexity": self.mean_perplexity,
             "mean_rank_1_fraction": self.mean_rank_1_fraction,
             "mean_avg_rank": self.mean_avg_rank,
+            "mean_bleu_1": self.mean_bleu_1,
+            "mean_rouge_1": self.mean_rouge_1,
+            "mean_rouge_l": self.mean_rouge_l,
             "samples": [s.to_dict() for s in self.samples],
         }
 
@@ -130,6 +166,10 @@ class ExperimentResults:
         with open(path) as f:
             d = json.load(f)
         samples = [SampleResult.from_dict(s) for s in d.pop("samples")]
+        # Handle older results without new fields
+        d.setdefault("mean_bleu_1", 0.0)
+        d.setdefault("mean_rouge_1", 0.0)
+        d.setdefault("mean_rouge_l", 0.0)
         return cls(samples=samples, **d)
 
     def compare(self, other: "ExperimentResults") -> str:
@@ -151,6 +191,9 @@ class ExperimentResults:
                 other.mean_rank_1_fraction * 100,
             ),
             ("Mean Avg Rank", self.mean_avg_rank, other.mean_avg_rank),
+            ("Mean BLEU-1", self.mean_bleu_1, other.mean_bleu_1),
+            ("Mean ROUGE-1", self.mean_rouge_1, other.mean_rouge_1),
+            ("Mean ROUGE-L", self.mean_rouge_l, other.mean_rouge_l),
         ]
 
         for name, v1, v2 in metrics:
