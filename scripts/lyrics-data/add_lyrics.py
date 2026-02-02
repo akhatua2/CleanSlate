@@ -1,5 +1,7 @@
 """
-Add lyrics to Billboard songs parquet file using Genius API.
+Add lyrics to Billboard songs parquet file using LRCLIB API.
+
+API docs: https://lrclib.net/docs
 
 Usage:
     python add_lyrics.py input.parquet output.parquet
@@ -7,17 +9,18 @@ Usage:
 
 import argparse
 import json
-import os
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import lyricsgenius
 import polars as pl
-from dotenv import load_dotenv
+import requests
 from tqdm import tqdm
 
-load_dotenv()
+LRCLIB_API_BASE = "https://lrclib.net/api"
+MAX_WORKERS = 15  # Number of parallel requests
+HEADERS = {
+    "User-Agent": "BillboardLyrics/1.0 (https://github.com/example/cleanslate)"
+}
 
 
 def get_cache_path(cache_dir: Path) -> Path:
@@ -47,56 +50,37 @@ def make_cache_key(title: str, artist: str) -> str:
     return f"{title.lower().strip()}|||{artist.lower().strip()}"
 
 
-def fetch_lyrics(
-    genius: lyricsgenius.Genius,
+def fetch_lyrics_from_lrclib(
     title: str,
     artist: str,
-    cache: dict[str, str | None],
-    cache_lock: threading.Lock,
-) -> str | None:
+) -> tuple[str, str, str | None]:
     """
-    Fetch lyrics for a song, using cache if available.
-    Returns lyrics string or None if not found.
-    Thread-safe with cache_lock.
+    Fetch lyrics from LRCLIB API.
+    Returns (title, artist, lyrics) tuple.
+    
+    API endpoint: https://lrclib.net/api/get?artist_name=X&track_name=Y
     """
-    cache_key = make_cache_key(title, artist)
-    
-    # Check cache (thread-safe read)
-    with cache_lock:
-        if cache_key in cache:
-            return cache[cache_key]
-    
     try:
-        song = genius.search_song(title, artist)
-        if song and song.lyrics:
-            lyrics = song.lyrics
-            with cache_lock:
-                cache[cache_key] = lyrics
-            return lyrics
-        else:
-            with cache_lock:
-                cache[cache_key] = None
-            return None
-    except Exception as e:
-        print(f"Error fetching '{title}' by '{artist}': {e}")
-        with cache_lock:
-            cache[cache_key] = None
-        return None
-
-
-def fetch_lyrics_task(
-    task: tuple[int, str, str],
-    genius: lyricsgenius.Genius,
-    cache: dict[str, str | None],
-    cache_lock: threading.Lock,
-) -> tuple[int, str | None]:
-    """
-    Worker task for ThreadPoolExecutor.
-    Returns (index, lyrics) tuple.
-    """
-    idx, title, artist = task
-    lyrics = fetch_lyrics(genius, title, artist, cache, cache_lock)
-    return (idx, lyrics)
+        url = f"{LRCLIB_API_BASE}/get"
+        params = {
+            "artist_name": artist,
+            "track_name": title,
+        }
+        response = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        
+        if response.status_code == 404:
+            # Song not found
+            return (title, artist, None)
+        
+        response.raise_for_status()
+        data = response.json()
+        
+        # Prefer plainLyrics
+        lyrics = data.get("plainLyrics")
+        return (title, artist, lyrics)
+    except requests.RequestException as e:
+        tqdm.write(f"Error fetching '{title}' by '{artist}': {e}")
+        return (title, artist, None)
 
 
 def add_lyrics_to_parquet(
@@ -104,32 +88,21 @@ def add_lyrics_to_parquet(
     output_path: str,
     cache_dir: str = "data/cache",
     save_interval: int = 50,
-    max_workers: int = 3,
 ) -> None:
     """
     Read parquet file, add lyrics column, and save to new file.
+    
+    Uses LRCLIB API (https://lrclib.net/docs) - no authentication required.
     
     Args:
         input_path: Path to input parquet file
         output_path: Path to output parquet file
         cache_dir: Directory to store lyrics cache
         save_interval: How often to save cache (every N songs)
-        max_workers: Number of concurrent API requests
     """
-    # Get API token from environment
-    token = os.environ.get("GENIUS_CLIENT_ACCESS_TOKEN")
-    if not token:
-        raise ValueError("GENIUS_CLIENT_ACCESS_TOKEN not found in environment")
-    
-    # Initialize Genius client
-    genius = lyricsgenius.Genius(token, verbose=False, remove_section_headers=True)
-    genius.timeout = 15
-    genius.retries = 3
-    
     # Load existing cache
     cache_path = Path(cache_dir)
     cache = load_cache(cache_path)
-    cache_lock = threading.Lock()
     print(f"Loaded {len(cache)} cached lyrics")
     
     # Read input parquet
@@ -138,68 +111,77 @@ def add_lyrics_to_parquet(
     
     # Check if lyrics column already exists
     if "lyrics" in df.columns:
+        # Only process songs without lyrics
         existing_lyrics = df["lyrics"].to_list()
         print("Found existing lyrics column, will skip songs with lyrics")
     else:
         existing_lyrics = [None] * len(df)
     
-    # Prepare results array and tasks
-    lyrics_results: dict[int, str | None] = {}
-    tasks_to_fetch: list[tuple[int, str, str]] = []
+    # Prepare list of songs to fetch (skip cached/existing)
+    songs_to_fetch = []  # List of (index, title, artist)
+    lyrics_list = [None] * len(df)
+    found_count = 0
     
-    # Separate cached/existing from tasks to fetch
     for i, row in enumerate(df.iter_rows(named=True)):
         title = row["title"]
         artists = row["artists"]
         primary_artist = artists[0] if artists else ""
-        
-        # Skip if lyrics already exist in dataframe
-        if existing_lyrics[i] is not None:
-            lyrics_results[i] = existing_lyrics[i]
-            continue
-        
-        # Check if in cache
         cache_key = make_cache_key(title, primary_artist)
-        if cache_key in cache:
-            lyrics_results[i] = cache[cache_key]
+        
+        # Check if lyrics already exist in dataframe
+        if existing_lyrics[i] is not None:
+            lyrics_list[i] = existing_lyrics[i]
+            if existing_lyrics[i]:
+                found_count += 1
             continue
         
-        # Need to fetch
-        tasks_to_fetch.append((i, title, primary_artist))
-    
-    print(f"Already have: {len(lyrics_results)} | Need to fetch: {len(tasks_to_fetch)}")
-    
-    # Fetch lyrics using thread pool
-    if tasks_to_fetch:
-        completed = 0
-        found_count = sum(1 for v in lyrics_results.values() if v)
+        # Check cache
+        if cache.get(cache_key):
+            lyrics_list[i] = cache[cache_key]
+            found_count += 1
+            continue
         
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(fetch_lyrics_task, task, genius, cache, cache_lock): task
-                for task in tasks_to_fetch
-            }
-            
-            pbar = tqdm(as_completed(futures), total=len(futures), desc="Fetching lyrics")
-            for future in pbar:
-                idx, lyrics = future.result()
-                lyrics_results[idx] = lyrics
-                completed += 1
+        # Need to fetch this one
+        songs_to_fetch.append((i, title, primary_artist))
+    
+    print(f"Songs to fetch: {len(songs_to_fetch)} (skipped {len(df) - len(songs_to_fetch)} cached/existing)")
+    
+    # Fetch lyrics in parallel using ThreadPoolExecutor
+    songs_fetched = 0
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all fetch tasks
+        future_to_song = {
+            executor.submit(fetch_lyrics_from_lrclib, title, artist): (idx, title, artist)
+            for idx, title, artist in songs_to_fetch
+        }
+        
+        # Process results as they complete
+        pbar = tqdm(as_completed(future_to_song), total=len(songs_to_fetch), desc="Fetching lyrics")
+        for future in pbar:
+            idx, title, artist = future_to_song[future]
+            try:
+                _, _, lyrics = future.result()
+                lyrics_list[idx] = lyrics
+                
+                # Update cache
+                cache_key = make_cache_key(title, artist)
+                cache[cache_key] = lyrics
+                
                 if lyrics:
                     found_count += 1
                 
+                songs_fetched += 1
                 pbar.set_postfix(found=found_count, cached=len(cache))
                 
                 # Periodically save cache
-                if completed % save_interval == 0:
-                    with cache_lock:
-                        save_cache(cache, cache_path)
+                if songs_fetched % save_interval == 0:
+                    save_cache(cache, cache_path)
+            except Exception as e:
+                tqdm.write(f"Error processing '{title}' by '{artist}': {e}")
     
     # Save final cache
     save_cache(cache, cache_path)
-    
-    # Build lyrics list in correct order
-    lyrics_list = [lyrics_results[i] for i in range(len(df))]
     
     # Add lyrics column to dataframe
     df = df.with_columns([pl.Series("lyrics", lyrics_list)])
@@ -219,8 +201,7 @@ def main():
     parser.add_argument("input", help="Input parquet file path")
     parser.add_argument("output", help="Output parquet file path")
     parser.add_argument("--cache-dir", default="data/cache", help="Cache directory")
-    parser.add_argument("--save-interval", type=int, default=50, help="Cache save interval")
-    parser.add_argument("--workers", type=int, default=2, help="Number of concurrent requests")
+    parser.add_argument("--save-interval", type=int, default=10, help="Cache save interval")
     args = parser.parse_args()
     
     add_lyrics_to_parquet(
@@ -228,7 +209,6 @@ def main():
         output_path=args.output,
         cache_dir=args.cache_dir,
         save_interval=args.save_interval,
-        max_workers=args.workers,
     )
 
 
