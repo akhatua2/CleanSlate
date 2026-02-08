@@ -8,7 +8,8 @@ from pathlib import Path
 import re
 from typing import Literal
 
-from .metrics import BLEU1, BLEU2, ROUGE1, ROUGE2, ROUGEL
+from cleanslate.metrics.bleu import BLEU1, BLEU2
+from cleanslate.metrics.rouge import ROUGE1, ROUGE2, ROUGEL
 
 
 @dataclass

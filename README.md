@@ -75,7 +75,7 @@ Generate multiple outputs per seed and save all data for later analysis.
 #### Python API
 
 ```python
-from cleanslate.generation_experiment import GenerationExperiment
+from cleanslate.generation import GenerationExperiment
 from cleanslate.samples import SHAKESPEARE_SAMPLES
 
 # Generate 3 outputs per seed

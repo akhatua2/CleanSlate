@@ -28,7 +28,7 @@ Plain English:
 
 from collections import Counter
 
-from .base import Metric, MetricResult
+from cleanslate.metrics.base import Metric, MetricResult
 
 
 def lcs_length(x: list[str], y: list[str]) -> int:

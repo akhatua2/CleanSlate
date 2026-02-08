@@ -11,14 +11,15 @@ except ImportError:
         "CLI dependencies not installed. Install with: pip install cleanslate[cli]"
     )
 
-from .experiment import Experiment
-from .generation import GenerationExperiment
-from .jailbreak import JailbreakExperiment
-from .results import ExperimentResults
-from .samples import SHAKESPEARE_SAMPLES, BOOK_SAMPLES, SONG_SAMPLES
-from .samples.billboard import load_billboard_songs
-from .prompts import list_templates, ALL_TEMPLATES
-from .evaluation import evaluate_jailbreak_results, summarize_evaluations, print_evaluation_summary
+from cleanslate.experiment import Experiment
+from cleanslate.generation import GenerationExperiment
+from cleanslate.jailbreak import JailbreakExperiment
+from cleanslate.results import ExperimentResults
+from cleanslate.samples.shakespeare import SHAKESPEARE_SAMPLES
+from cleanslate.samples.books import BOOK_SAMPLES
+from cleanslate.samples.billboard import load_billboard_songs
+from cleanslate.prompts import ALL_TEMPLATES
+from cleanslate.evaluation import evaluate_jailbreak_results, summarize_evaluations, print_evaluation_summary
 
 app = typer.Typer(
     name="cleanslate",
@@ -270,7 +271,7 @@ def jailbreak(
         1, "--num-generations", help="Generations per (song, template, seed_mode)"
     ),
     max_tokens: int = typer.Option(
-        1024, "--max-tokens", help="Maximum tokens to generate"
+        8192, "--max-tokens", help="Maximum tokens to generate"
     ),
     temperature: float = typer.Option(
         0.6, "--temperature", help="Sampling temperature"

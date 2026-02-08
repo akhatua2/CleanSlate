@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from .backends.base import InferenceBackend
-from .backends.huggingface import HuggingFaceBackend
+from cleanslate.backends.base import InferenceBackend
+from cleanslate.backends.huggingface import HuggingFaceBackend
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +97,11 @@ class GenerationExperiment:
             if self._backend_type == "huggingface":
                 self._backend = HuggingFaceBackend(self.model_name, device=self._device)
             elif self._backend_type == "vllm":
-                from .backends.vllm_backend import VLLMBackend
+                from cleanslate.backends.vllm_backend import VLLMBackend
 
                 self._backend = VLLMBackend(self.model_name)
             elif self._backend_type == "sglang":
-                from .backends.sglang_backend import SGLangBackend
+                from cleanslate.backends.sglang_backend import SGLangBackend
 
                 self._backend = SGLangBackend(self.model_name, **self._backend_kwargs)
             else:

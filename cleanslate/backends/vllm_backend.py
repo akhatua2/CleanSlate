@@ -12,7 +12,7 @@ except ImportError:
         "vLLM not installed. Install with: pip install cleanslate[vllm] or uv sync --extra vllm"
     )
 
-from .base import InferenceBackend, ProbabilityResult
+from cleanslate.backends.base import InferenceBackend, ProbabilityResult
 
 logger = logging.getLogger(__name__)
 
