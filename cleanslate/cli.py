@@ -12,9 +12,9 @@ except ImportError:
     )
 
 from .experiment import Experiment
-from .generation_experiment import GenerationExperiment
+from .generation import GenerationExperiment
 from .results import ExperimentResults
-from .samples import SHAKESPEARE_SAMPLES, BOOK_SAMPLES
+from .samples import SHAKESPEARE_SAMPLES, BOOK_SAMPLES, SONG_SAMPLES
 
 app = typer.Typer(
     name="cleanslate",
@@ -146,27 +146,41 @@ def generate(
         "Qwen/Qwen2.5-0.5B-Instruct", "--model", "-m", help="Model name"
     ),
     dataset: str = typer.Option(
-        "shakespeare", "--dataset", "-d", help="Dataset: shakespeare, books, or all"
+        "all",
+        "--dataset",
+        "-d",
+        help="Dataset: shakespeare, books, songs, or all",
     ),
     output: str = typer.Option(
         ...,
         "--output",
         "-o",
-        help="Output file path (.parquet or directory for HF dataset)",
+        help="Output file path (.parquet)",
+    ),
+    backend: str = typer.Option(
+        "huggingface",
+        "--backend",
+        "-b",
+        help="Backend: huggingface or sglang",
     ),
     num_generations: int = typer.Option(
         3, "--num-generations", "-n", help="Number of generations per seed"
     ),
     max_tokens: int = typer.Option(
-        100, "--max-tokens", help="Maximum tokens per generation"
+        128, "--max-tokens", help="Maximum tokens per generation"
     ),
     temperature: float = typer.Option(
-        0.8, "--temperature", "-t", help="Sampling temperature"
+        1.0, "--temperature", "-t", help="Sampling temperature"
     ),
-    top_p: float = typer.Option(0.95, "--top-p", help="Nucleus sampling (top-p)"),
-    top_k: int = typer.Option(50, "--top-k", help="Top-k sampling"),
-    save_format: str = typer.Option(
-        "parquet", "--format", help="Save format: parquet, hf_dataset, or both"
+    top_p: Optional[float] = typer.Option(
+        None, "--top-p", help="Nucleus sampling (top-p)"
+    ),
+    top_k: Optional[int] = typer.Option(None, "--top-k", help="Top-k sampling"),
+    batch_size: int = typer.Option(8, "--batch-size", help="Batch size for generation"),
+    hf_repo: Optional[str] = typer.Option(
+        None,
+        "--hf-repo",
+        help="Push to HuggingFace Hub repo (e.g. unlearning-cleanslate/generations)",
     ),
     device: Optional[str] = typer.Option(
         None, "--device", help="Device: cpu, cuda, mps, or auto"
@@ -175,13 +189,8 @@ def generate(
     """
     Generate multiple outputs per seed and save all data (no metrics computed).
 
-    This mode is useful for:
-    - Collecting generation data for later analysis
-    - Comparing multiple model outputs
-    - Building datasets of model generations
-
     Saves: tokens, logprobs, top-k alternatives, full generated text, etc.
-    Format: HuggingFace-compatible Parquet files or HF datasets
+    Use --backend sglang for GPU-optimized batch generation.
     """
 
     # Select samples
@@ -189,51 +198,45 @@ def generate(
         samples = SHAKESPEARE_SAMPLES
     elif dataset == "books":
         samples = BOOK_SAMPLES
+    elif dataset == "songs":
+        samples = SONG_SAMPLES
     elif dataset == "all":
-        samples = SHAKESPEARE_SAMPLES + BOOK_SAMPLES
+        samples = SHAKESPEARE_SAMPLES + BOOK_SAMPLES + SONG_SAMPLES
     else:
         console.print(f"[red]Unknown dataset: {dataset}[/red]")
-        console.print("Available: shakespeare, books, all")
+        console.print("Available: shakespeare, books, songs, all")
         raise typer.Exit(1)
 
-    console.print("[bold]Generation Experiment (No Metrics)[/bold]")
     console.print(f"[bold]Model:[/bold] {model}")
+    console.print(f"[bold]Backend:[/bold] {backend}")
     console.print(f"[bold]Dataset:[/bold] {dataset} ({len(samples)} samples)")
-    console.print(f"[bold]Generations per seed:[/bold] {num_generations}")
-    console.print(f"[bold]Max tokens:[/bold] {max_tokens}")
-    console.print(f"[bold]Temperature:[/bold] {temperature}")
-    console.print(f"[bold]Top-p:[/bold] {top_p}")
-    console.print(f"[bold]Top-k:[/bold] {top_k}")
-    console.print(f"[bold]Save format:[/bold] {save_format}")
-    console.print()
-
-    # Run generation experiment
-    exp = GenerationExperiment(model=model, name="generation", device=device)
-    all_generations = exp.run_generation(
-        samples=samples,
-        num_generations=num_generations,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        output_path=output,
-        save_format=save_format,
-    )
-
-    console.print()
     console.print(
-        f"[green]✅ Saved {len(all_generations)} generations to {output}[/green]"
+        f"[bold]Generations:[/bold] {num_generations} x {len(samples)} = "
+        f"{num_generations * len(samples)} total"
     )
+    console.print(f"[bold]Batch size:[/bold] {batch_size}")
     console.print()
-    console.print("[bold]To load and analyze later:[/bold]")
-    if save_format in ["parquet", "both"]:
-        console.print("  import pandas as pd")
+
+    exp = GenerationExperiment(model=model, backend=backend, device=device)
+    rows = exp.run(
+        samples=samples,
+        dataset_name=dataset,
+        output_path=output,
+        num_generations=num_generations,
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        batch_size=batch_size,
+        hf_repo=hf_repo,
+    )
+
+    console.print()
+    console.print(f"[green]Saved {len(rows)} generations to {output}[/green]")
+    if hf_repo:
         console.print(
-            f"  df = pd.read_parquet('{output}.parquet' if not '{output}'.endswith('.parquet') else '{output}')"
+            f"[green]Pushed to https://huggingface.co/datasets/{hf_repo}[/green]"
         )
-    if save_format in ["hf_dataset", "both"]:
-        console.print("  from datasets import load_from_disk")
-        console.print(f"  dataset = load_from_disk('{output.replace('.parquet', '')}')")
 
 
 def main():

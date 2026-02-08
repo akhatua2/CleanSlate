@@ -121,6 +121,7 @@ class GenerationExperiment:
         do_sample: bool = True,
         capture_top_k: int = 50,
         batch_size: int = 8,
+        hf_repo: str | None = None,
     ) -> list[GenerationRow]:
         """
         Run generation on all samples and save to parquet.
@@ -219,15 +220,15 @@ class GenerationExperiment:
                 )
                 rows.append(row)
 
-        # Save outputs (both parquet and json by default)
+        # Save parquet locally
         path = Path(output_path)
         base = path.parent / path.stem
+        parquet_path = f"{base}.parquet"
+        self._save_output(rows, parquet_path, format="parquet")
 
-        # Always save parquet (for HF datasets compatibility)
-        self._save_output(rows, f"{base}.parquet", format="parquet")
-
-        # Also save JSON (human readable)
-        self._save_output(rows, f"{base}.json", format="json")
+        # Push to HuggingFace Hub if requested
+        if hf_repo:
+            self._push_to_hub(rows, hf_repo, dataset_name)
 
         return rows
 
@@ -271,3 +272,17 @@ class GenerationExperiment:
             )
 
         logger.info("Saved %d generations to %s", len(rows), path)
+
+    def _push_to_hub(
+        self,
+        rows: list[GenerationRow],
+        hf_repo: str,
+        dataset_name: str,
+    ) -> None:
+        """Push generation rows to HuggingFace Hub as a dataset."""
+        from datasets import Dataset
+
+        data = [row.to_dict() for row in rows]
+        ds = Dataset.from_list(data)
+        ds.push_to_hub(hf_repo, config_name=dataset_name)
+        logger.info("Pushed %d rows to %s/%s", len(rows), hf_repo, dataset_name)
