@@ -25,7 +25,9 @@ dependencies = [
 
 [project.optional-dependencies]
 vllm = ["vllm"]
+sglang = ["sglang"]
 cli = ["typer", "rich"]
+export = ["pyarrow", "datasets"]
 
 [project.scripts]
 cleanslate = "cleanslate.cli:main"

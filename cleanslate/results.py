@@ -1,8 +1,11 @@
 """Structured results for experiments."""
 
+import logging
 from dataclasses import dataclass, field, asdict
 import json
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -46,7 +49,9 @@ class SampleResult:
             return "No token data available."
 
         lines = []
-        lines.append(f"{'Pos':>4} │ {'Target':<15} │ {'Predicted':<15} │ {'Rank':>5} │ Match")
+        lines.append(
+            f"{'Pos':>4} │ {'Target':<15} │ {'Predicted':<15} │ {'Rank':>5} │ Match"
+        )
         lines.append("─" * 60)
 
         for i, (tgt, pred, rank) in enumerate(
@@ -158,7 +163,7 @@ class ExperimentResults:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
-        print(f"Results saved to {path}")
+        logger.info("Results saved to %s", path)
 
     @classmethod
     def load(cls, path: str | Path) -> "ExperimentResults":
