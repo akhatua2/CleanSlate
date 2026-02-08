@@ -142,33 +142,48 @@ def list_samples():
 
 @app.command()
 def generate(
-    model: str = typer.Option("Qwen/Qwen2.5-0.5B-Instruct", "--model", "-m", help="Model name"),
+    model: str = typer.Option(
+        "Qwen/Qwen2.5-0.5B-Instruct", "--model", "-m", help="Model name"
+    ),
     dataset: str = typer.Option(
         "shakespeare", "--dataset", "-d", help="Dataset: shakespeare, books, or all"
     ),
-    output: str = typer.Option(..., "--output", "-o", help="Output file path (.parquet or directory for HF dataset)"),
-    num_generations: int = typer.Option(3, "--num-generations", "-n", help="Number of generations per seed"),
-    max_tokens: int = typer.Option(100, "--max-tokens", help="Maximum tokens per generation"),
-    temperature: float = typer.Option(0.8, "--temperature", "-t", help="Sampling temperature"),
+    output: str = typer.Option(
+        ...,
+        "--output",
+        "-o",
+        help="Output file path (.parquet or directory for HF dataset)",
+    ),
+    num_generations: int = typer.Option(
+        3, "--num-generations", "-n", help="Number of generations per seed"
+    ),
+    max_tokens: int = typer.Option(
+        100, "--max-tokens", help="Maximum tokens per generation"
+    ),
+    temperature: float = typer.Option(
+        0.8, "--temperature", "-t", help="Sampling temperature"
+    ),
     top_p: float = typer.Option(0.95, "--top-p", help="Nucleus sampling (top-p)"),
     top_k: int = typer.Option(50, "--top-k", help="Top-k sampling"),
-    save_format: str = typer.Option("parquet", "--format", help="Save format: parquet, hf_dataset, or both"),
+    save_format: str = typer.Option(
+        "parquet", "--format", help="Save format: parquet, hf_dataset, or both"
+    ),
     device: Optional[str] = typer.Option(
         None, "--device", help="Device: cpu, cuda, mps, or auto"
     ),
 ):
     """
     Generate multiple outputs per seed and save all data (no metrics computed).
-    
+
     This mode is useful for:
     - Collecting generation data for later analysis
     - Comparing multiple model outputs
     - Building datasets of model generations
-    
+
     Saves: tokens, logprobs, top-k alternatives, full generated text, etc.
     Format: HuggingFace-compatible Parquet files or HF datasets
     """
-    
+
     # Select samples
     if dataset == "shakespeare":
         samples = SHAKESPEARE_SAMPLES
@@ -204,16 +219,20 @@ def generate(
         output_path=output,
         save_format=save_format,
     )
-    
+
     console.print()
-    console.print(f"[green]✅ Saved {len(all_generations)} generations to {output}[/green]")
+    console.print(
+        f"[green]✅ Saved {len(all_generations)} generations to {output}[/green]"
+    )
     console.print()
     console.print("[bold]To load and analyze later:[/bold]")
     if save_format in ["parquet", "both"]:
-        console.print(f"  import pandas as pd")
-        console.print(f"  df = pd.read_parquet('{output}.parquet' if not '{output}'.endswith('.parquet') else '{output}')")
+        console.print("  import pandas as pd")
+        console.print(
+            f"  df = pd.read_parquet('{output}.parquet' if not '{output}'.endswith('.parquet') else '{output}')"
+        )
     if save_format in ["hf_dataset", "both"]:
-        console.print(f"  from datasets import load_from_disk")
+        console.print("  from datasets import load_from_disk")
         console.print(f"  dataset = load_from_disk('{output.replace('.parquet', '')}')")
 
 

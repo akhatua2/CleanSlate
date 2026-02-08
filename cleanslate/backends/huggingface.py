@@ -1,10 +1,14 @@
 """HuggingFace Transformers backend - works on CPU and GPU."""
 
+import logging
+
 import torch
 from torch.nn import functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .base import InferenceBackend, ProbabilityResult
+
+logger = logging.getLogger(__name__)
 
 
 class HuggingFaceBackend(InferenceBackend):
@@ -42,7 +46,7 @@ class HuggingFaceBackend(InferenceBackend):
 
         self._dtype = dtype
 
-        print(f"Loading {model_name} on {self._device} with {dtype}...")
+        logger.info("Loading %s on %s with %s...", model_name, self._device, dtype)
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name, trust_remote_code=True
@@ -59,7 +63,7 @@ class HuggingFaceBackend(InferenceBackend):
             self.model = self.model.to(self._device)
 
         self.model.eval()
-        print(f"Model loaded on {self._device}.")
+        logger.info("Model loaded on %s.", self._device)
 
     def _resolve_device(self, device: str | None) -> str:
         """Resolve device string to actual device."""
@@ -184,9 +188,11 @@ class HuggingFaceBackend(InferenceBackend):
                 - finish_reason: Why generation stopped
         """
         # Tokenize input
-        input_ids = self.tokenizer.encode(seed, return_tensors="pt", add_special_tokens=True)
+        input_ids = self.tokenizer.encode(
+            seed, return_tensors="pt", add_special_tokens=True
+        )
         input_ids = input_ids.to(self._device)
-        
+
         # Generate with logprobs
         with torch.no_grad():
             outputs = self.model.generate(
@@ -200,21 +206,21 @@ class HuggingFaceBackend(InferenceBackend):
                 return_dict_in_generate=True,
                 output_scores=return_logprobs,
             )
-        
+
         # Extract generated tokens (excluding input)
-        generated_ids = outputs.sequences[0][len(input_ids[0]):]
+        generated_ids = outputs.sequences[0][len(input_ids[0]) :]
         generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
-        
+
         # Decode individual tokens
         token_strings = [self.tokenizer.decode([tid]) for tid in generated_ids]
-        
+
         # Determine finish reason
         finish_reason = "stop"
         if len(generated_ids) >= max_tokens:
             finish_reason = "length"
         elif generated_ids[-1].item() == self.tokenizer.eos_token_id:
             finish_reason = "eos"
-        
+
         result = {
             "generated_text": generated_text,
             "tokens": generated_ids.cpu().tolist(),
@@ -222,23 +228,25 @@ class HuggingFaceBackend(InferenceBackend):
             "num_tokens": len(generated_ids),
             "finish_reason": finish_reason,
         }
-        
+
         # Add log probabilities if requested
-        if return_logprobs and hasattr(outputs, 'scores') and outputs.scores:
+        if return_logprobs and hasattr(outputs, "scores") and outputs.scores:
             token_logprobs = []
             top_logprobs_data = []
-            
+
             for i, score in enumerate(outputs.scores):
                 # Get log probabilities
                 log_probs = F.log_softmax(score[0], dim=-1)
-                
+
                 # Get log prob for the selected token
                 selected_token = generated_ids[i].item()
                 token_logprob = log_probs[selected_token].item()
                 token_logprobs.append(token_logprob)
-                
+
                 # Get top-k alternatives
-                top_k_logprobs, top_k_indices = torch.topk(log_probs, k=min(10, len(log_probs)))
+                top_k_logprobs, top_k_indices = torch.topk(
+                    log_probs, k=min(10, len(log_probs))
+                )
                 top_alternatives = [
                     {
                         "token_id": int(top_k_indices[j]),
@@ -248,10 +256,12 @@ class HuggingFaceBackend(InferenceBackend):
                     for j in range(len(top_k_indices))
                 ]
                 top_logprobs_data.append(top_alternatives)
-            
+
             result["token_logprobs"] = token_logprobs
             result["top_logprobs"] = top_logprobs_data
             result["cumulative_logprob"] = sum(token_logprobs)
-            result["mean_logprob"] = sum(token_logprobs) / len(token_logprobs) if token_logprobs else 0.0
-        
+            result["mean_logprob"] = (
+                sum(token_logprobs) / len(token_logprobs) if token_logprobs else 0.0
+            )
+
         return result

@@ -1,11 +1,14 @@
 """Experiment harness for running memorization probes."""
 
+import logging
 from datetime import datetime
 from typing import Literal
 
 from .backends.base import InferenceBackend
 from .backends.huggingface import HuggingFaceBackend
 from .results import ExperimentResults, SampleResult
+
+logger = logging.getLogger(__name__)
 
 
 BackendType = Literal["huggingface", "vllm", "sglang"]
@@ -81,7 +84,7 @@ class Experiment:
             seed = sample["seed"]
             target = sample["target"]
 
-            print(f"[{i + 1}/{len(samples)}] {name}...")
+            logger.info("[%d/%d] %s...", i + 1, len(samples), name)
 
             result = estimator.compute(seed, target)
 

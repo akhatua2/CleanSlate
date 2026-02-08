@@ -16,7 +16,7 @@ __all__ = [
     "MetricResult",
     # N-gram metrics
     "BLEU",
-    "BLEU1", 
+    "BLEU1",
     "BLEU2",
     "ROUGE1",
     "ROUGE2",

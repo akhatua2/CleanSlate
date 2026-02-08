@@ -1,21 +1,28 @@
 """Generation experiment - generate N outputs per seed and save everything."""
 
 from datetime import datetime
+import logging
 import time
 from typing import Optional
 
 from .backends.base import InferenceBackend
 from .backends.huggingface import HuggingFaceBackend
-from .generation_data import GenerationOutput, GenerationBatch, save_generations_parquet, save_generations_hf_dataset
+from .generation_data import (
+    GenerationOutput,
+    save_generations_parquet,
+    save_generations_hf_dataset,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class GenerationExperiment:
     """
     Experiment for generating multiple outputs per seed and saving all data.
-    
+
     Unlike the standard Experiment which computes metrics, this saves raw generations
     for later analysis.
-    
+
     Example:
         exp = GenerationExperiment(model="Qwen/Qwen2.5-0.5B-Instruct")
         exp.run_generation(
@@ -55,7 +62,9 @@ class GenerationExperiment:
                     self.model_name, device=self._device
                 )
             else:
-                raise ValueError(f"Backend {self._backend_type} not supported for generation yet")
+                raise ValueError(
+                    f"Backend {self._backend_type} not supported for generation yet"
+                )
         return self._estimator
 
     def generate_from_seed(
@@ -88,19 +97,19 @@ class GenerationExperiment:
             List of GenerationOutput objects
         """
         backend = self._get_backend()
-        
-        if not hasattr(backend, 'generate'):
+
+        if not hasattr(backend, "generate"):
             raise NotImplementedError(
                 f"Backend {self._backend_type} doesn't support generation yet"
             )
 
         generations = []
-        
+
         for i in range(num_generations):
-            print(f"  Generation {i+1}/{num_generations}...")
-            
+            logger.info("  Generation %d/%d...", i + 1, num_generations)
+
             start_time = time.time()
-            
+
             # Generate
             result = backend.generate(
                 seed=seed,
@@ -110,9 +119,9 @@ class GenerationExperiment:
                 top_k=top_k,
                 return_logprobs=True,
             )
-            
+
             generation_time_ms = (time.time() - start_time) * 1000
-            
+
             # Create GenerationOutput
             gen_output = GenerationOutput(
                 sample_id=sample_id,
@@ -139,9 +148,9 @@ class GenerationExperiment:
                 timestamp=datetime.now().isoformat(),
                 generation_time_ms=generation_time_ms,
             )
-            
+
             generations.append(gen_output)
-        
+
         return generations
 
     def run_generation(
@@ -172,19 +181,22 @@ class GenerationExperiment:
             List of all GenerationOutput objects
         """
         all_generations = []
-        
-        print(f"Generating {num_generations} outputs per seed for {len(samples)} samples...")
-        print(f"Total generations: {len(samples) * num_generations}")
-        print()
-        
+
+        logger.info(
+            "Generating %d outputs per seed for %d samples...",
+            num_generations,
+            len(samples),
+        )
+        logger.info("Total generations: %d", len(samples) * num_generations)
+
         for i, sample in enumerate(samples):
             sample_name = sample.get("name", f"sample_{i}")
             sample_id = f"sample_{i:04d}"
             seed = sample["seed"]
             original_target = sample.get("target", None)
-            
-            print(f"[{i + 1}/{len(samples)}] {sample_name}")
-            
+
+            logger.info("[%d/%d] %s", i + 1, len(samples), sample_name)
+
             generations = self.generate_from_seed(
                 seed=seed,
                 num_generations=num_generations,
@@ -196,21 +208,23 @@ class GenerationExperiment:
                 sample_name=sample_name,
                 original_target=original_target,
             )
-            
+
             all_generations.extend(generations)
-            print()
-        
-        print(f"✅ Generated {len(all_generations)} outputs total")
-        print()
-        
+
+        logger.info("Generated %d outputs total", len(all_generations))
+
         # Save if requested
         if output_path:
             if save_format == "parquet" or save_format == "both":
-                parquet_path = output_path if output_path.endswith(".parquet") else f"{output_path}.parquet"
+                parquet_path = (
+                    output_path
+                    if output_path.endswith(".parquet")
+                    else f"{output_path}.parquet"
+                )
                 save_generations_parquet(all_generations, parquet_path)
-            
+
             if save_format == "hf_dataset" or save_format == "both":
                 hf_path = output_path.replace(".parquet", "")
                 save_generations_hf_dataset(all_generations, hf_path)
-        
+
         return all_generations

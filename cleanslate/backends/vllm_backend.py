@@ -1,17 +1,20 @@
 """vLLM backend - GPU optimized inference."""
 
+import logging
+
 import torch
 from torch.nn import functional as F
 
 try:
     from vllm import LLM
-    from vllm.model_executor.models import ModelRegistry
 except ImportError:
     raise ImportError(
         "vLLM not installed. Install with: pip install cleanslate[vllm] or uv sync --extra vllm"
     )
 
 from .base import InferenceBackend, ProbabilityResult
+
+logger = logging.getLogger(__name__)
 
 
 class VLLMBackend(InferenceBackend):
@@ -23,7 +26,9 @@ class VLLMBackend(InferenceBackend):
     Uses vLLM's LLM engine for efficient GPU inference.
     """
 
-    def __init__(self, model_name: str, gpu_memory_utilization: float = 0.5, **llm_kwargs):
+    def __init__(
+        self, model_name: str, gpu_memory_utilization: float = 0.5, **llm_kwargs
+    ):
         """
         Initialize the vLLM backend.
 
@@ -34,7 +39,7 @@ class VLLMBackend(InferenceBackend):
                           (e.g., tensor_parallel_size, max_model_len, etc.)
         """
         self._model_name = model_name
-        
+
         # Default kwargs for vLLM LLM - VERY conservative settings for log prob computation
         default_kwargs = {
             "trust_remote_code": True,
@@ -46,16 +51,16 @@ class VLLMBackend(InferenceBackend):
             "disable_log_stats": True,  # Disable logging overhead
         }
         default_kwargs.update(llm_kwargs)
-        
-        print(f"Loading {model_name} with vLLM on CUDA...")
-        print(f"  Memory utilization: {gpu_memory_utilization}")
-        print(f"  Max sequence length: {default_kwargs['max_model_len']}")
+
+        logger.info("Loading %s with vLLM on CUDA...", model_name)
+        logger.info("  Memory utilization: %s", gpu_memory_utilization)
+        logger.info("  Max sequence length: %s", default_kwargs["max_model_len"])
         self.llm = LLM(model=model_name, **default_kwargs)
-        
+
         # Get tokenizer from the LLM engine
         self.tokenizer = self.llm.get_tokenizer()
-        
-        print(f"Model loaded with vLLM on CUDA.")
+
+        logger.info("Model loaded with vLLM on CUDA.")
 
     @property
     def device(self) -> str:
@@ -95,23 +100,23 @@ class VLLMBackend(InferenceBackend):
         # Access through the engine_core client
         try:
             # Try v0.15.0+ API structure
-            if hasattr(self.llm, 'llm_engine'):
+            if hasattr(self.llm, "llm_engine"):
                 engine = self.llm.llm_engine
                 # In v0.15.0, the structure changed
-                if hasattr(engine, 'engine_core'):
+                if hasattr(engine, "engine_core"):
                     # V1 engine with engine_core
                     raise RuntimeError(
                         "vLLM v0.15.0 uses V1 engine which doesn't expose model directly. "
                         "Use HuggingFace backend instead for log probability computation."
                     )
-                elif hasattr(engine, 'model_executor'):
+                elif hasattr(engine, "model_executor"):
                     # V0 engine (older API)
                     model = engine.model_executor.driver_worker.model_runner.model
                 else:
                     raise RuntimeError("Unknown vLLM engine structure")
             else:
                 raise RuntimeError("Cannot access vLLM engine")
-                
+
         except Exception as e:
             raise RuntimeError(
                 f"Cannot access vLLM model for log probability computation: {e}\n\n"
@@ -119,10 +124,10 @@ class VLLMBackend(InferenceBackend):
                 "Recommendation: Use 'huggingface' backend for log probability computation.\n"
                 "It's simpler, more reliable, and uses less memory for this use case."
             )
-        
+
         # Prepare input tensor
         input_ids = torch.tensor([full_ids], device="cuda", dtype=torch.long)
-        
+
         # Run forward pass to get logits
         # vLLM models typically have a forward method that returns logits
         with torch.no_grad():
@@ -130,7 +135,7 @@ class VLLMBackend(InferenceBackend):
                 # Try to use the model's forward method directly
                 # Most vLLM models support this
                 outputs = model.forward(input_ids, use_cache=False)
-                
+
                 # Extract logits from output
                 if isinstance(outputs, tuple):
                     logits = outputs[0]  # First element is usually logits
@@ -138,7 +143,7 @@ class VLLMBackend(InferenceBackend):
                     logits = outputs.logits
                 else:
                     logits = outputs
-                    
+
             except Exception as e:
                 # Fallback: try accessing through model's layers
                 # Some vLLM models structure things differently
@@ -152,9 +157,15 @@ class VLLMBackend(InferenceBackend):
                         if hasattr(model, "model"):
                             base_model = model.model
                             outputs = base_model(input_ids)
-                            logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+                            logits = (
+                                outputs.logits
+                                if hasattr(outputs, "logits")
+                                else outputs[0]
+                            )
                         else:
-                            raise RuntimeError(f"Could not extract logits from vLLM model: {e}")
+                            raise RuntimeError(
+                                f"Could not extract logits from vLLM model: {e}"
+                            )
                 except Exception as e2:
                     raise RuntimeError(
                         f"Failed to get logits from vLLM model. "

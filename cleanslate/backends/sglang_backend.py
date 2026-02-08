@@ -1,57 +1,58 @@
-"""SGLang backend - Efficient GPU inference with better memory management."""
+"""SGLang backend - GPU-optimized inference with continuous batching.
 
-import torch
-from torch.nn import functional as F
+SGLang's Engine runs the model in a separate scheduler process and uses
+continuous batching to maximize GPU utilization. This makes it much faster
+than HuggingFace for large-scale generation workloads.
+
+Key advantages over HuggingFace backend:
+  - Continuous batching: many prompts scheduled concurrently
+  - PagedAttention KV cache: efficient memory management
+  - Native logprob support: no manual softmax needed
+  - Async scheduler: overlaps compute and I/O
+
+Requires: pip install cleanslate[sglang]  (or uv sync --extra sglang)
+Important: Scripts using this backend MUST use `if __name__ == '__main__':` guard.
+"""
+
+import logging
+import math
+import time
+from typing import Any
 
 try:
-    import sglang as sgl
+    from sglang.srt.entrypoints.engine import Engine
 except ImportError:
     raise ImportError(
-        "SGLang not installed. Install with: pip install cleanslate[sglang] or uv sync --extra sglang"
+        "SGLang not installed. Install with: pip install cleanslate[sglang] "
+        "or uv sync --extra sglang"
     )
 
-from .base import InferenceBackend, ProbabilityResult, GenerationResult
+from .base import GenerationResult, InferenceBackend, ProbabilityResult
+
+logger = logging.getLogger(__name__)
 
 
 class SGLangBackend(InferenceBackend):
-    """
-    SGLang backend for GPU-optimized inference.
+    """SGLang backend for GPU-optimized inference with continuous batching.
 
-    Requires: pip install cleanslate[sglang]
-
-    SGLang is more memory-efficient than vLLM and has better APIs for log probability computation.
+    Uses SGLang's offline Engine API - no HTTP server needed.
+    Supports native batch generation for full GPU utilization.
     """
 
-    def __init__(self, model_name: str, **runtime_kwargs):
-        """
-        Initialize the SGLang backend.
-
-        Args:
-            model_name: HuggingFace model name or path
-            **runtime_kwargs: Additional arguments to pass to SGLang's Runtime
-                             (e.g., tp_size, mem_fraction_static, etc.)
-        """
+    def __init__(self, model_name: str, **engine_kwargs: Any) -> None:
         self._model_name = model_name
-        
-        # Default kwargs for SGLang Runtime
-        default_kwargs = {
+
+        defaults: dict[str, Any] = {
             "trust_remote_code": True,
-            "mem_fraction_static": 0.7,  # Use 70% of GPU memory
+            "mem_fraction_static": 0.85,
+            "disable_cuda_graph": True,
         }
-        default_kwargs.update(runtime_kwargs)
-        
-        print(f"Loading {model_name} with SGLang on CUDA...")
-        
-        # Initialize SGLang runtime
-        self.runtime = sgl.Runtime(
-            model_path=model_name,
-            **default_kwargs
-        )
-        
-        # Get tokenizer
-        self.tokenizer = self.runtime.tokenizer
-        
-        print(f"Model loaded with SGLang on CUDA.")
+        defaults.update(engine_kwargs)
+
+        logger.info("Loading %s with SGLang Engine...", model_name)
+        self.engine = Engine(model_path=model_name, **defaults)
+        self.tokenizer = self.engine.tokenizer_manager.tokenizer
+        logger.info("Model loaded with SGLang on CUDA.")
 
     @property
     def device(self) -> str:
@@ -61,92 +62,56 @@ class SGLangBackend(InferenceBackend):
     def model_name(self) -> str:
         return self._model_name
 
-    def compute(self, seed: str, target: str) -> ProbabilityResult:
+    # ------------------------------------------------------------------
+    # Probability computation
+    # ------------------------------------------------------------------
+
+    def compute(
+        self, seed: str, target: str, **decoding_options: Any
+    ) -> ProbabilityResult:
+        """Compute P(target | seed) using SGLang's logprob API."""
+        return self._compute_single(seed, target)
+
+    def compute_batch(
+        self,
+        pairs: list[tuple[str, str]],
+        **decoding_options: Any,
+    ) -> list[ProbabilityResult]:
+        """Compute probabilities for many (seed, target) pairs in one batch.
+
+        SGLang's continuous batching scheduler runs all prompts concurrently,
+        giving much higher GPU utilization than sequential calls.
         """
-        Compute P(target | seed) using SGLang.
+        if not pairs:
+            return []
 
-        The math:
-        - P(target | seed) = ∏ P(t_i | seed, t_1, ..., t_{i-1})
-        - log P(target | seed) = Σ log P(t_i | seed, t_1, ..., t_{i-1})
-        """
-        # Tokenize seed and full text separately to find boundary
-        seed_ids = self.tokenizer.encode(seed, add_special_tokens=True)
-        full_text = seed + target
-        full_ids = self.tokenizer.encode(full_text, add_special_tokens=True)
+        # Build batch: full texts + per-prompt logprob_start_len
+        prompts: list[str] = []
+        seed_lens: list[int] = []
+        for seed, target in pairs:
+            seed_ids = self.tokenizer.encode(seed, add_special_tokens=True)
+            prompts.append(seed + target)
+            seed_lens.append(len(seed_ids))
 
-        # Target tokens start after seed
-        seed_len = len(seed_ids)
-        target_ids = full_ids[seed_len:]
+        # logprob_start_len one position early so the None falls on last seed token
+        logprob_starts = [max(0, sl - 1) for sl in seed_lens]
 
-        if len(target_ids) == 0:
-            return ProbabilityResult(
-                log_prob=0.0,
-                perplexity=1.0,
-                num_tokens=0,
-                token_log_probs=[],
-            )
-
-        # Use SGLang's forward method to get logits
-        # SGLang provides a cleaner API for this
-        with torch.no_grad():
-            # Get logits from SGLang runtime
-            # We'll use the model's forward pass directly
-            input_ids = torch.tensor([full_ids], device="cuda", dtype=torch.long)
-            
-            # Access the underlying model
-            model = self.runtime.model
-            outputs = model(input_ids)
-            
-            # Extract logits
-            if hasattr(outputs, "logits"):
-                logits = outputs.logits
-            elif isinstance(outputs, tuple):
-                logits = outputs[0]
-            else:
-                logits = outputs
-
-        # Get log probabilities via log_softmax
-        log_probs = F.log_softmax(logits, dim=-1)  # [1, seq_len, vocab_size]
-
-        # Extract log probs and ranks for target tokens
-        # logits[i] predicts token[i+1]
-        # So for target token at position seed_len, we look at logits[seed_len-1]
-        token_log_probs: list[float] = []
-        token_ranks: list[int] = []
-
-        for i, token_id in enumerate(target_ids):
-            logit_pos = seed_len - 1 + i
-            if logit_pos >= log_probs.shape[1]:
-                break
-
-            # Get log prob for this token
-            token_log_prob = log_probs[0, logit_pos, token_id].item()
-            token_log_probs.append(token_log_prob)
-
-            # Get rank: how many tokens have higher probability?
-            # rank 1 = this was the model's top choice
-            probs_at_pos = log_probs[0, logit_pos]
-            rank = int((probs_at_pos > token_log_prob).sum().item()) + 1
-            token_ranks.append(rank)
-
-        # Aggregate
-        total_log_prob = sum(token_log_probs)
-        num_tokens = len(token_log_probs)
-
-        # Perplexity = exp(-avg_log_prob) = exp(-total_log_prob / num_tokens)
-        perplexity = (
-            float(torch.exp(torch.tensor(-total_log_prob / num_tokens)).item())
-            if num_tokens > 0
-            else 1.0
+        results_raw = self.engine.generate(
+            prompt=prompts,
+            sampling_params=[{"max_new_tokens": 0, "temperature": 0}] * len(prompts),
+            return_logprob=[True] * len(prompts),
+            logprob_start_len=logprob_starts,
+            top_logprobs_num=[1] * len(prompts),
         )
 
-        return ProbabilityResult(
-            log_prob=total_log_prob,
-            perplexity=perplexity,
-            num_tokens=num_tokens,
-            token_log_probs=token_log_probs,
-            token_ranks=token_ranks,
-        )
+        out: list[ProbabilityResult] = []
+        for i, raw in enumerate(results_raw):
+            out.append(self._parse_logprobs(raw, seed_lens[i], logprob_starts[i]))
+        return out
+
+    # ------------------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------------------
 
     def generate(
         self,
@@ -158,102 +123,182 @@ class SGLangBackend(InferenceBackend):
         do_sample: bool = True,
         capture_top_k: int = 50,
     ) -> GenerationResult:
-        """
-        Generate text from seed and capture token-level probabilities.
+        """Generate text from a single seed with full logprob capture."""
+        results = self.generate_batch(
+            seeds=[seed],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+            capture_top_k=capture_top_k,
+        )
+        return results[0]
 
-        Args:
-            seed: The prefix/prompt text
-            max_new_tokens: Maximum number of tokens to generate
-            temperature: Sampling temperature (higher = more random)
-            top_k: Top-k filtering for sampling
-            top_p: Nucleus sampling threshold
-            do_sample: Whether to sample (vs greedy decode)
-            capture_top_k: Number of top tokens/probs to capture per position
+    def generate_batch(
+        self,
+        seeds: list[str],
+        max_new_tokens: int = 128,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        capture_top_k: int = 50,
+    ) -> list[GenerationResult]:
+        """Generate text from many seeds in a single batched call.
 
-        Returns:
-            GenerationResult with generated text and probability data
+        All prompts are submitted together and SGLang's continuous batching
+        scheduler handles them concurrently for maximum GPU utilization.
         """
-        import time
+        if not seeds:
+            return []
+
         start_time = time.time()
 
-        with torch.no_grad():
-            # Tokenize seed
-            seed_ids = self.tokenizer.encode(seed, add_special_tokens=True)
-            input_ids = torch.tensor([seed_ids], device="cuda", dtype=torch.long)
+        sampling_params: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature if do_sample else 0.0,
+        }
+        if top_k is not None:
+            sampling_params["top_k"] = top_k
+        if top_p is not None:
+            sampling_params["top_p"] = top_p
 
-            # Get the model from runtime
-            model = self.runtime.model
+        # Single batched call - SGLang schedules all prompts concurrently
+        raw_results = self.engine.generate(
+            prompt=seeds,
+            sampling_params=[sampling_params] * len(seeds),
+            return_logprob=[True] * len(seeds),
+            logprob_start_len=[0] * len(seeds),
+            top_logprobs_num=[capture_top_k] * len(seeds),
+        )
 
-            # Track generated tokens and their logprobs
-            generated_token_ids: list[int] = []
-            token_log_probs: list[float] = []
-            top_k_tokens_list: list[list[int]] = []
-            top_k_probs_list: list[list[float]] = []
+        batch_time_ms = (time.time() - start_time) * 1000
+        per_item_ms = batch_time_ms / len(seeds)
 
-            # Generate tokens one by one
-            current_input = input_ids
-            eos_token_id = self.tokenizer.eos_token_id
+        out: list[GenerationResult] = []
+        for raw in raw_results:
+            out.append(
+                self._parse_generation(
+                    raw,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                    generation_time_ms=per_item_ms,
+                )
+            )
+        return out
 
-            for step in range(max_new_tokens):
-                # Forward pass
-                outputs = model(current_input)
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-                # Extract logits from last position
-                if hasattr(outputs, "logits"):
-                    logits = outputs.logits
-                elif isinstance(outputs, tuple):
-                    logits = outputs[0]
-                else:
-                    logits = outputs
+    def _parse_logprobs(
+        self, raw: dict, seed_len: int, logprob_start: int
+    ) -> ProbabilityResult:
+        """Parse SGLang generate response into a ProbabilityResult."""
+        meta = raw["meta_info"]
+        input_logprobs = meta.get("input_token_logprobs", [])
+        input_top_logprobs = meta.get("input_top_logprobs", [])
 
-                # Get last token logits and apply temperature
-                next_token_logits = logits[0, -1, :] / temperature if temperature > 0 else logits[0, -1, :]
+        # Skip entries before the target region
+        offset = seed_len - logprob_start
+        target_logprobs = input_logprobs[offset:]
+        target_top = input_top_logprobs[offset:] if input_top_logprobs else []
 
-                # Apply top-k filtering if specified
-                if top_k is not None:
-                    top_k_vals, top_k_indices = torch.topk(next_token_logits, k=min(top_k, next_token_logits.shape[0]))
-                    next_token_logits = torch.full_like(next_token_logits, float('-inf'))
-                    next_token_logits[top_k_indices] = top_k_vals
+        token_log_probs: list[float] = []
+        token_ranks: list[int] = []
 
-                # Get log probabilities
-                log_probs = F.log_softmax(next_token_logits, dim=-1)
+        for i, entry in enumerate(target_logprobs):
+            lp = entry[0]
+            token_id = entry[1]
+            if lp is None:
+                continue
 
-                # Sample or greedy select
-                if do_sample and temperature > 0:
-                    probs = torch.exp(log_probs)
-                    next_token = torch.multinomial(probs, num_samples=1).item()
-                else:
-                    next_token = log_probs.argmax(dim=-1).item()
+            token_log_probs.append(float(lp))
 
-                # Capture token info
-                token_log_prob = log_probs[next_token].item()
-                generated_token_ids.append(next_token)
-                token_log_probs.append(token_log_prob)
+            # Rank from top-1: if the actual token IS the top prediction, rank=1
+            if i < len(target_top) and target_top[i]:
+                top1_id = target_top[i][0][1]
+                token_ranks.append(1 if token_id == top1_id else 2)
+            else:
+                token_ranks.append(1 if lp > -0.01 else 2)
 
-                # Capture top-k alternatives
-                top_k_count = min(capture_top_k, log_probs.shape[0])
-                top_k_logprobs, top_k_indices = torch.topk(log_probs, k=top_k_count)
-                top_k_tokens_list.append(top_k_indices.cpu().tolist())
-                top_k_probs_list.append(top_k_logprobs.cpu().tolist())
+        n = len(token_log_probs)
+        total = sum(token_log_probs)
+        ppl = math.exp(-total / n) if n > 0 else 1.0
 
-                # Check for end of sequence
-                if next_token == eos_token_id:
-                    break
+        return ProbabilityResult(
+            log_prob=total,
+            perplexity=ppl,
+            num_tokens=n,
+            token_log_probs=token_log_probs,
+            token_ranks=token_ranks,
+        )
 
-                # Append token and continue
-                current_input = torch.cat([
-                    current_input,
-                    torch.tensor([[next_token]], device="cuda", dtype=torch.long)
-                ], dim=1)
+    def _compute_single(self, seed: str, target: str) -> ProbabilityResult:
+        """Compute a single (seed, target) pair."""
+        seed_ids = self.tokenizer.encode(seed, add_special_tokens=True)
+        seed_len = len(seed_ids)
+        full_text = seed + target
+        full_ids = self.tokenizer.encode(full_text, add_special_tokens=True)
 
-        # Decode generated tokens
-        generated_text = self.tokenizer.decode(generated_token_ids, skip_special_tokens=False)
-        generated_tokens = [
-            self.tokenizer.decode([token_id], skip_special_tokens=False)
-            for token_id in generated_token_ids
-        ]
+        if len(full_ids) <= seed_len:
+            return ProbabilityResult(
+                log_prob=0.0, perplexity=1.0, num_tokens=0, token_log_probs=[]
+            )
 
-        generation_time_ms = (time.time() - start_time) * 1000
+        logprob_start = max(0, seed_len - 1)
+        raw = self.engine.generate(
+            prompt=full_text,
+            sampling_params={"max_new_tokens": 0, "temperature": 0},
+            return_logprob=True,
+            logprob_start_len=logprob_start,
+            top_logprobs_num=1,
+        )
+        return self._parse_logprobs(raw, seed_len, logprob_start)
+
+    def _parse_generation(
+        self,
+        raw: dict,
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int | None,
+        top_p: float | None,
+        do_sample: bool,
+        generation_time_ms: float,
+    ) -> GenerationResult:
+        """Parse a single SGLang generate response into GenerationResult."""
+        meta = raw["meta_info"]
+        generated_text: str = raw.get("text", "")
+        output_ids: list[int] = raw.get("output_ids", [])
+
+        output_logprobs = meta.get("output_token_logprobs", [])
+        output_top = meta.get("output_top_logprobs", [])
+
+        token_log_probs: list[float] = []
+        generated_token_ids: list[int] = []
+        top_k_tokens_list: list[list[int]] = []
+        top_k_probs_list: list[list[float]] = []
+
+        for i, entry in enumerate(output_logprobs):
+            token_log_probs.append(float(entry[0]))
+            generated_token_ids.append(int(entry[1]))
+
+            if i < len(output_top) and output_top[i]:
+                top_k_tokens_list.append([int(t[1]) for t in output_top[i]])
+                top_k_probs_list.append([float(t[0]) for t in output_top[i]])
+            else:
+                top_k_tokens_list.append([])
+                top_k_probs_list.append([])
+
+        if not generated_token_ids and output_ids:
+            generated_token_ids = list(output_ids)
+
+        generated_tokens = [self.tokenizer.decode([tid]) for tid in generated_token_ids]
 
         return GenerationResult(
             generated_text=generated_text,
@@ -270,7 +315,10 @@ class SGLangBackend(InferenceBackend):
             generation_time_ms=generation_time_ms,
         )
 
-    def __del__(self):
-        """Cleanup SGLang runtime."""
-        if hasattr(self, 'runtime'):
-            self.runtime.shutdown()
+    def shutdown(self) -> None:
+        """Shut down the SGLang engine and free GPU memory."""
+        if hasattr(self, "engine"):
+            self.engine.shutdown()
+
+    def __del__(self) -> None:
+        self.shutdown()

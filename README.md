@@ -115,7 +115,35 @@ cleanslate generate -m Qwen/Qwen3-0.6B -d shakespeare -n 3 -o generations.parque
 - HuggingFace Datasets
 - Both
 
-See `GENERATION_MODE.md` for complete guide.
+## Backends
+
+| Backend | Install | Best For |
+|---------|---------|----------|
+| **HuggingFace** (default) | `pip install -e .` | Simple setup, CPU/GPU, single-sample probes |
+| **SGLang** | `pip install -e ".[sglang]"` | GPU-optimized batch generation, continuous batching |
+| **vLLM** | `pip install -e ".[vllm]"` | Basic support (not recommended) |
+
+### SGLang Backend
+
+SGLang uses continuous batching and PagedAttention for maximum GPU utilization.
+Ideal for large-scale generation workloads.
+
+```python
+from cleanslate.generation import GenerationExperiment
+from cleanslate.samples import SHAKESPEARE_SAMPLES
+
+# SGLang backend with batch generation
+exp = GenerationExperiment(model="Qwen/Qwen2.5-0.5B-Instruct", backend="sglang")
+rows = exp.run(
+    samples=SHAKESPEARE_SAMPLES,
+    dataset_name="shakespeare",
+    output_path="generations/shakespeare.parquet",
+    num_generations=5,
+    batch_size=32,
+)
+```
+
+**Important:** Scripts using the SGLang backend must use `if __name__ == '__main__':` guard.
 
 ## Metrics
 
