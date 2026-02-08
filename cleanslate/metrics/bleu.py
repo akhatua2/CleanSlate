@@ -24,7 +24,7 @@ Plain English:
 from collections import Counter
 import math
 
-from .base import Metric, MetricResult
+from cleanslate.metrics.base import Metric, MetricResult
 
 
 def get_ngrams(tokens: list[str], n: int) -> Counter:

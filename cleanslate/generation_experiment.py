@@ -5,9 +5,9 @@ import logging
 import time
 from typing import Optional
 
-from .backends.base import InferenceBackend
-from .backends.huggingface import HuggingFaceBackend
-from .generation_data import (
+from cleanslate.backends.base import InferenceBackend
+from cleanslate.backends.huggingface import HuggingFaceBackend
+from cleanslate.generation_data import (
     GenerationOutput,
     save_generations_parquet,
     save_generations_hf_dataset,
@@ -35,7 +35,7 @@ class GenerationExperiment:
     def __init__(
         self,
         model: str,
-        name: str = "generation_experiment",
+        name: str = "generation",
         backend: str = "huggingface",
         device: str | None = None,
     ):

@@ -27,7 +27,7 @@ except ImportError:
         "or uv sync --extra sglang"
     )
 
-from .base import GenerationResult, InferenceBackend, ProbabilityResult
+from cleanslate.backends.base import GenerationResult, InferenceBackend, ProbabilityResult
 
 logger = logging.getLogger(__name__)
 

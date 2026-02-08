@@ -6,7 +6,7 @@ import torch
 from torch.nn import functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .base import InferenceBackend, ProbabilityResult
+from cleanslate.backends.base import InferenceBackend, ProbabilityResult
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +195,7 @@ class HuggingFaceBackend(InferenceBackend):
             messages,
             tokenize=False,
             add_generation_prompt=add_generation_prompt,
+            enable_thinking=False,
         )
 
     @torch.no_grad()

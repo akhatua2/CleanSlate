@@ -4,9 +4,11 @@ import logging
 from datetime import datetime
 from typing import Literal
 
-from .backends.base import InferenceBackend
-from .backends.huggingface import HuggingFaceBackend
-from .results import ExperimentResults, SampleResult
+from cleanslate.backends.base import InferenceBackend
+from cleanslate.backends.huggingface import HuggingFaceBackend
+from cleanslate.metrics.bleu import BLEU1
+from cleanslate.metrics.rouge import ROUGE1, ROUGEL
+from cleanslate.results import ExperimentResults, SampleResult
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ class Experiment:
                     self.model_name, device=self._device
                 )
             elif self._backend_type == "vllm":
-                from .backends.vllm_backend import VLLMBackend
+                from cleanslate.backends.vllm_backend import VLLMBackend
 
                 self._estimator = VLLMBackend(self.model_name)
             elif self._backend_type == "sglang":

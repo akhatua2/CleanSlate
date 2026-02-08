@@ -9,10 +9,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from .backends.base import GenerationResult, InferenceBackend
-from .backends.huggingface import HuggingFaceBackend
-from .prompts import PromptTemplate, SeedMode, get_templates, ALL_TEMPLATES
-from .samples.billboard import get_lyrics_prefix
+from cleanslate.backends.base import GenerationResult, InferenceBackend
+from cleanslate.backends.huggingface import HuggingFaceBackend
+from cleanslate.prompts import PromptTemplate, SeedMode, get_templates, ALL_TEMPLATES
+from cleanslate.samples.billboard import get_lyrics_prefix
 
 
 @dataclass
@@ -111,7 +111,7 @@ class JailbreakExperiment:
                     self.model_name, device=self._device
                 )
             elif self._backend_type == "vllm":
-                from .backends.vllm_backend import VLLMBackend
+                from cleanslate.backends.vllm_backend import VLLMBackend
                 self._backend = VLLMBackend(self.model_name)
             else:
                 raise ValueError(f"Unknown backend: {self._backend_type}")
