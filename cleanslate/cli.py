@@ -13,8 +13,12 @@ except ImportError:
 
 from .experiment import Experiment
 from .generation import GenerationExperiment
+from .jailbreak import JailbreakExperiment
 from .results import ExperimentResults
 from .samples import SHAKESPEARE_SAMPLES, BOOK_SAMPLES, SONG_SAMPLES
+from .samples.billboard import load_billboard_songs
+from .prompts import list_templates, ALL_TEMPLATES
+from .evaluation import evaluate_jailbreak_results, summarize_evaluations, print_evaluation_summary
 
 app = typer.Typer(
     name="cleanslate",
@@ -230,13 +234,245 @@ def generate(
         batch_size=batch_size,
         hf_repo=hf_repo,
     )
-
+    
     console.print()
     console.print(f"[green]Saved {len(rows)} generations to {output}[/green]")
     if hf_repo:
         console.print(
             f"[green]Pushed to https://huggingface.co/datasets/{hf_repo}[/green]"
         )
+
+
+@app.command()
+def jailbreak(
+    model: str = typer.Option("Qwen/Qwen3-0.6B", "--model", "-m", help="Model name"),
+    output: str = typer.Option(
+        "outputs/jailbreak", "--output", "-o", help="Output base path"
+    ),
+    year_start: int = typer.Option(
+        2021, "--year-start", help="Start year for songs (inclusive)"
+    ),
+    year_end: int = typer.Option(
+        2022, "--year-end", help="End year for songs (inclusive)"
+    ),
+    limit: int = typer.Option(
+        50, "--limit", "-n", help="Maximum number of songs to test"
+    ),
+    templates: Optional[str] = typer.Option(
+        None, "--templates", "-t", 
+        help="Comma-separated template names (default: direct,helpful_assistant,music_expert,educational)"
+    ),
+    seed_modes: Optional[str] = typer.Option(
+        None, "--seed-modes", "-s",
+        help="Comma-separated seed modes: none,first_line,first_verse,half (default: none,first_line)"
+    ),
+    num_generations: int = typer.Option(
+        1, "--num-generations", help="Generations per (song, template, seed_mode)"
+    ),
+    max_tokens: int = typer.Option(
+        1024, "--max-tokens", help="Maximum tokens to generate"
+    ),
+    temperature: float = typer.Option(
+        0.6, "--temperature", help="Sampling temperature"
+    ),
+    batch_size: int = typer.Option(
+        32, "--batch-size", "-b", help="Batch size for generation"
+    ),
+    device: Optional[str] = typer.Option(
+        None, "--device", help="Device: cpu, cuda, mps, or auto"
+    ),
+    shuffle: bool = typer.Option(
+        True, "--shuffle/--no-shuffle", help="Shuffle songs before selecting"
+    ),
+):
+    """Run jailbreak experiment on Billboard songs.
+    
+    Tests different prompt templates and seed modes to measure
+    how much lyrics models will reproduce.
+    
+    Examples:
+        cleanslate jailbreak -m Qwen/Qwen3-0.6B -n 20
+        cleanslate jailbreak -m meta-llama/Llama-3-8B --year-start 2020 -t direct,music_expert
+        cleanslate jailbreak -m google/gemma-2-9b -s none,first_line,first_verse
+    """
+    
+    # Load songs
+    console.print(f"[bold]Loading Billboard songs ({year_start}-{year_end})...[/bold]")
+    try:
+        songs = load_billboard_songs(
+            year_range=(year_start, year_end),
+            limit=limit,
+            shuffle=shuffle,
+        )
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    
+    console.print(f"Loaded {len(songs)} songs")
+    
+    # Parse templates
+    if templates:
+        template_list = [t.strip() for t in templates.split(",")]
+        for t in template_list:
+            if t not in ALL_TEMPLATES:
+                console.print(f"[red]Unknown template: {t}[/red]")
+                console.print(f"Available: {list(ALL_TEMPLATES.keys())}")
+                raise typer.Exit(1)
+    else:
+        template_list = ["direct", "helpful_assistant", "music_expert", "educational"]
+    
+    # Parse seed modes
+    if seed_modes:
+        seed_mode_list = [s.strip() for s in seed_modes.split(",")]
+        valid_modes = {"none", "first_line", "first_verse", "half"}
+        for s in seed_mode_list:
+            if s not in valid_modes:
+                console.print(f"[red]Unknown seed mode: {s}[/red]")
+                console.print(f"Available: {valid_modes}")
+                raise typer.Exit(1)
+    else:
+        seed_mode_list = ["none", "first_line"]
+    
+    total_gens = len(songs) * len(template_list) * len(seed_mode_list) * num_generations
+    
+    console.print()
+    console.print("[bold]Jailbreak Experiment Configuration[/bold]")
+    console.print(f"  Model: {model}")
+    console.print(f"  Songs: {len(songs)} ({year_start}-{year_end})")
+    console.print(f"  Templates: {template_list}")
+    console.print(f"  Seed modes: {seed_mode_list}")
+    console.print(f"  Generations per config: {num_generations}")
+    console.print(f"  Total generations: {total_gens}")
+    console.print(f"  Output: {output}")
+    console.print()
+    
+    # Run experiment
+    exp = JailbreakExperiment(
+        model=model,
+        device=device,
+        experiment_name=f"jailbreak_{year_start}_{year_end}",
+    )
+    
+    rows = exp.run(
+        songs=songs,
+        templates=template_list,
+        seed_modes=seed_mode_list,
+        output_path=output,
+        num_generations=num_generations,
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        batch_size=batch_size,
+        top_p=0.95,
+        top_k=20,
+        do_sample=True, 
+    )
+    
+    console.print()
+    console.print(f"[bold green]Completed {len(rows)} generations[/bold green]")
+    console.print(f"Results saved to: {output}.parquet and {output}.json")
+    
+    # Show sample
+    if rows:
+        console.print()
+        console.print("[bold]Sample output:[/bold]")
+        sample = rows[0]
+        console.print(f"[dim]Song:[/dim] {sample.song_name}")
+        console.print(f"[dim]Template:[/dim] {sample.prompt_template}")
+        console.print(f"[dim]Seed mode:[/dim] {sample.seed_mode}")
+        console.print(f"[dim]Generated:[/dim] {sample.generated_text[:300]}...")
+
+
+@app.command()
+def evaluate(
+    results_path: str = typer.Argument(..., help="Path to jailbreak results (parquet or json)"),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o", help="Output path for evaluation results"
+    ),
+    group_by: str = typer.Option(
+        "both", "--group-by", "-g", 
+        help="Group results by: template, seed_mode, or both"
+    ),
+):
+    """Evaluate jailbreak experiment results.
+    
+    Computes metrics comparing generated text to ground truth lyrics:
+    - BLEU-1, BLEU-2: N-gram precision
+    - ROUGE-1, ROUGE-L: N-gram recall/F1
+    - Exact match, line match rates
+    
+    Examples:
+        cleanslate evaluate outputs/jailbreak.parquet
+        cleanslate evaluate results.json -o eval_results.json --group-by template
+    """
+    from pathlib import Path
+    
+    path = Path(results_path)
+    if not path.exists():
+        console.print(f"[red]File not found: {results_path}[/red]")
+        raise typer.Exit(1)
+    
+    console.print(f"[bold]Evaluating results from {results_path}...[/bold]")
+    
+    # Run evaluation
+    eval_results = evaluate_jailbreak_results(results_path, output)
+    
+    console.print(f"Evaluated {len(eval_results)} generations")
+    
+    # Summarize and print
+    if group_by not in ("template", "seed_mode", "both"):
+        console.print(f"[red]Invalid group_by: {group_by}. Use: template, seed_mode, or both[/red]")
+        raise typer.Exit(1)
+    
+    summary = summarize_evaluations(eval_results, group_by=group_by)
+    print_evaluation_summary(summary)
+
+
+@app.command()
+def list_templates():
+    """List available prompt templates for jailbreak experiments."""
+    
+    console.print("[bold]Available Prompt Templates:[/bold]")
+    console.print()
+    
+    for name, template in ALL_TEMPLATES.items():
+        console.print(f"[cyan]{name}[/cyan]")
+        console.print(f"  {template.description}")
+        if template.system_prompt:
+            # Truncate long system prompts
+            sp = template.system_prompt[:100] + "..." if len(template.system_prompt) > 100 else template.system_prompt
+            console.print(f"  [dim]System: {sp}[/dim]")
+        console.print()
+
+
+@app.command()
+def list_billboard(
+    year_start: int = typer.Option(1970, "--year-start", help="Start year"),
+    year_end: int = typer.Option(2025, "--year-end", help="End year"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Number of songs to show"),
+):
+    """List Billboard songs from the dataset."""
+    
+    try:
+        songs = load_billboard_songs(
+            year_range=(year_start, year_end),
+            limit=limit,
+            shuffle=False,
+        )
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    
+    console.print(f"[bold]Billboard Songs ({year_start}-{year_end}):[/bold]")
+    console.print()
+    
+    for i, song in enumerate(songs, 1):
+        artists = ", ".join(song["artists"]) if song["artists"] else "Unknown"
+        lyrics_preview = song["lyrics"][:50] + "..." if len(song["lyrics"]) > 50 else song["lyrics"]
+        lyrics_preview = lyrics_preview.replace("\n", " ")
+        
+        console.print(f"[cyan]{i}. {song['title']}[/cyan] - {artists} ({song['year']})")
+        console.print(f"   [dim]{lyrics_preview}[/dim]")
+        console.print()
 
 
 def main():
