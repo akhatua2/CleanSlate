@@ -158,6 +158,122 @@ class HuggingFaceBackend(InferenceBackend):
             token_ranks=token_ranks,
         )
 
+    def format_chat(
+        self,
+        messages: list[dict],
+        add_generation_prompt: bool = True,
+    ) -> str:
+        """
+        Format chat messages using the model's chat template.
+        
+        Args:
+            messages: List of message dicts with "role" and "content" keys
+                      e.g., [{"role": "system", "content": "..."}, 
+                             {"role": "user", "content": "..."}]
+            add_generation_prompt: Whether to add the generation prompt at the end
+            
+        Returns:
+            Formatted prompt string ready for generation
+        """
+        if not hasattr(self.tokenizer, 'apply_chat_template'):
+            # Fallback for tokenizers without chat templates
+            prompt_parts = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    prompt_parts.append(f"System: {content}\n\n")
+                elif role == "user":
+                    prompt_parts.append(f"User: {content}\n\n")
+                elif role == "assistant":
+                    prompt_parts.append(f"Assistant: {content}\n\n")
+            if add_generation_prompt:
+                prompt_parts.append("Assistant: ")
+            return "".join(prompt_parts)
+        
+        return self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        )
+
+    @torch.no_grad()
+    def generate_chat(
+        self,
+        messages: list[dict],
+        max_new_tokens: int = 512,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        capture_top_k: int = 50,
+    ) -> GenerationResult:
+        """
+        Generate text from chat messages with captured logits.
+        
+        Uses the model's chat template to format messages, then generates.
+        
+        Args:
+            messages: List of message dicts with "role" and "content" keys
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            do_sample: Whether to sample (vs greedy)
+            capture_top_k: Number of top tokens to save per position
+            
+        Returns:
+            GenerationResult with generated text and probability data
+        """
+        prompt = self.format_chat(messages)
+        return self.generate(
+            seed=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+            capture_top_k=capture_top_k,
+        )
+
+    @torch.no_grad()
+    def generate_chat_batch(
+        self,
+        messages_batch: list[list[dict]],
+        max_new_tokens: int = 512,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        capture_top_k: int = 50,
+    ) -> list[GenerationResult]:
+        """
+        Generate text from multiple chat message lists in a batch.
+        
+        Args:
+            messages_batch: List of message lists, each formatted for chat
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            do_sample: Whether to sample (vs greedy)
+            capture_top_k: Number of top tokens to save per position
+            
+        Returns:
+            List of GenerationResult, one per message list
+        """
+        prompts = [self.format_chat(msgs) for msgs in messages_batch]
+        return self.generate_batch(
+            seeds=prompts,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+            capture_top_k=capture_top_k,
+        )
+
+    @torch.no_grad()
     def generate(
         self,
         seed: str,
