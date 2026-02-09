@@ -2,19 +2,22 @@ from __future__ import annotations
 
 from typing import Literal
 
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 
 DATASET_ID = "unlearning-cleanslate/forget_set_identification"
+DEFAULT_DATASET_SPLIT = "1970_2025_en_songs"
 
 
-def load_billboard_songs(
+def load_billboard_dataset(
+    dataset_id: str = DATASET_ID,
+    dataset_split: str = DEFAULT_DATASET_SPLIT,
     year_range: tuple[int, int] | None = None,
     limit: int | None = None,
     require_lyrics: bool = True,
     shuffle: bool = False,
     seed: int = 42,
-) -> list[dict]:
-    ds = load_dataset(DATASET_ID, split="1970_2025_en_songs")
+) -> Dataset:
+    ds = load_dataset(dataset_id, split=dataset_split)
 
     if year_range:
         start_year, end_year = year_range
@@ -28,6 +31,28 @@ def load_billboard_songs(
 
     if limit:
         ds = ds.select(range(min(limit, len(ds))))
+
+    return ds
+
+
+def load_billboard_songs(
+    year_range: tuple[int, int] | None = None,
+    limit: int | None = None,
+    require_lyrics: bool = True,
+    shuffle: bool = False,
+    seed: int = 42,
+    dataset_id: str = DATASET_ID,
+    dataset_split: str = DEFAULT_DATASET_SPLIT,
+) -> list[dict]:
+    ds = load_billboard_dataset(
+        dataset_id=dataset_id,
+        dataset_split=dataset_split,
+        year_range=year_range,
+        limit=limit,
+        require_lyrics=require_lyrics,
+        shuffle=shuffle,
+        seed=seed,
+    )
 
     samples = []
     for row in ds:
@@ -76,5 +101,4 @@ def get_lyrics_prefix(
         return lyrics[:half_point]
 
     return ""
-
 

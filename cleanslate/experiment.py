@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Literal
 
 from cleanslate.backends.base import InferenceBackend
-from cleanslate.backends.huggingface import HuggingFaceBackend
+from cleanslate.backends import create_backend
 from cleanslate.metrics.bleu import BLEU1
 from cleanslate.metrics.rouge import ROUGE1, ROUGEL
 from cleanslate.results import ExperimentResults, SampleResult
@@ -31,7 +31,7 @@ class Experiment:
         self,
         model: str,
         name: str = "experiment",
-        backend: BackendType = "huggingface",
+        backend: BackendType | InferenceBackend = "huggingface",
         device: str | None = None,
     ):
         """
@@ -48,24 +48,16 @@ class Experiment:
         self._backend_type = backend
         self._device = device
         self._estimator: InferenceBackend | None = None
+        if isinstance(backend, InferenceBackend):
+            self._estimator = backend
+            self._backend_type = "custom"
 
     def _get_estimator(self) -> InferenceBackend:
         """Lazy-load the model."""
         if self._estimator is None:
-            if self._backend_type == "huggingface":
-                self._estimator = HuggingFaceBackend(
-                    self.model_name, device=self._device
-                )
-            elif self._backend_type == "vllm":
-                from cleanslate.backends.vllm_backend import VLLMBackend
-
-                self._estimator = VLLMBackend(self.model_name)
-            elif self._backend_type == "sglang":
-                from .backends.sglang_backend import SGLangBackend
-
-                self._estimator = SGLangBackend(self.model_name)
-            else:
-                raise ValueError(f"Unknown backend: {self._backend_type}")
+            self._estimator = create_backend(
+                self._backend_type, self.model_name, device=self._device
+            )
         return self._estimator
 
     def run(self, samples: list[dict]) -> ExperimentResults:

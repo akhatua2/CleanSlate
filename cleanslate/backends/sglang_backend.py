@@ -28,6 +28,7 @@ except ImportError:
     )
 
 from cleanslate.backends.base import GenerationResult, InferenceBackend, ProbabilityResult
+from cleanslate.chat_format import format_chat as _format_chat
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,22 @@ class SGLangBackend(InferenceBackend):
     # ------------------------------------------------------------------
     # Generation
     # ------------------------------------------------------------------
+
+    def format_chat(
+        self,
+        messages: list[dict],
+        add_generation_prompt: bool = True,
+        enable_thinking: bool = False,
+    ) -> str:
+        """
+        Format chat messages using the model's chat template if available.
+        """
+        return _format_chat(
+            self.tokenizer,
+            messages,
+            add_generation_prompt=add_generation_prompt,
+            enable_thinking=enable_thinking,
+        )
 
     def generate(
         self,

@@ -1,4 +1,4 @@
-"""Prompt templates for jailbreak experiments.
+"""Prompt templates for lyrics prompt experiments.
 
 Each template defines a system prompt and user prompt format for eliciting
 song lyrics from language models with different framing strategies.
@@ -247,6 +247,13 @@ DEFAULT_TEMPLATES: list[str] = [
 NO_SYSTEM_TEMPLATES: list[str] = [
     "direct",
     "no_system",
+]
+
+ALL_SEED_MODES: list[SeedMode] = [
+    "none",
+    "first_line",
+    "first_verse",
+    "half",
 ]
 
 

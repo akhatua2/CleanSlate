@@ -1,12 +1,15 @@
 """HuggingFace Transformers backend - works on CPU and GPU."""
 
 import logging
+import time
+from typing import Any
 
 import torch
 from torch.nn import functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from cleanslate.backends.base import InferenceBackend, ProbabilityResult
+from cleanslate.backends.base import GenerationResult, InferenceBackend, ProbabilityResult
+from cleanslate.chat_format import format_chat as _format_chat
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +88,9 @@ class HuggingFaceBackend(InferenceBackend):
         return self._model_name
 
     @torch.no_grad()
-    def compute(self, seed: str, target: str) -> ProbabilityResult:
+    def compute(
+        self, seed: str, target: str, **decoding_options: Any
+    ) -> ProbabilityResult:
         """
         Compute P(target | seed) using HuggingFace forward pass.
 
@@ -162,6 +167,7 @@ class HuggingFaceBackend(InferenceBackend):
         self,
         messages: list[dict],
         add_generation_prompt: bool = True,
+        enable_thinking: bool = False,
     ) -> str:
         """
         Format chat messages using the model's chat template.
@@ -175,27 +181,11 @@ class HuggingFaceBackend(InferenceBackend):
         Returns:
             Formatted prompt string ready for generation
         """
-        if not hasattr(self.tokenizer, 'apply_chat_template'):
-            # Fallback for tokenizers without chat templates
-            prompt_parts = []
-            for msg in messages:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if role == "system":
-                    prompt_parts.append(f"System: {content}\n\n")
-                elif role == "user":
-                    prompt_parts.append(f"User: {content}\n\n")
-                elif role == "assistant":
-                    prompt_parts.append(f"Assistant: {content}\n\n")
-            if add_generation_prompt:
-                prompt_parts.append("Assistant: ")
-            return "".join(prompt_parts)
-        
-        return self.tokenizer.apply_chat_template(
+        return _format_chat(
+            self.tokenizer,
             messages,
-            tokenize=False,
             add_generation_prompt=add_generation_prompt,
-            enable_thinking=False,
+            enable_thinking=enable_thinking,
         )
 
     @torch.no_grad()
@@ -278,107 +268,94 @@ class HuggingFaceBackend(InferenceBackend):
     def generate(
         self,
         seed: str,
-        max_tokens: int = 100,
+        max_new_tokens: int = 128,
         temperature: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = 50,
-        return_logprobs: bool = True,
-    ) -> dict:
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        capture_top_k: int = 50,
+    ) -> GenerationResult:
         """
-        Generate text from seed with detailed token information.
+        Generate text from seed and capture token-level probabilities.
 
         Args:
-            seed: The prompt/seed text
-            max_tokens: Maximum number of tokens to generate
-            temperature: Sampling temperature
-            top_p: Nucleus sampling parameter
-            top_k: Top-k sampling parameter
-            return_logprobs: Whether to return log probabilities
+            seed: The prefix/prompt text
+            max_new_tokens: Maximum number of tokens to generate
+            temperature: Sampling temperature (higher = more random)
+            top_k: Top-k filtering for sampling
+            top_p: Nucleus sampling threshold
+            do_sample: Whether to sample (vs greedy decode)
+            capture_top_k: Number of top tokens/probs to capture per position
 
         Returns:
-            Dictionary with:
-                - generated_text: The generated text
-                - tokens: List of token IDs
-                - token_strings: List of decoded tokens
-                - token_logprobs: List of log probabilities (if return_logprobs=True)
-                - top_logprobs: List of top-k alternatives per token (if return_logprobs=True)
-                - finish_reason: Why generation stopped
+            GenerationResult with generated text and probability data
         """
+        start_time = time.time()
+
         # Tokenize input
         input_ids = self.tokenizer.encode(
             seed, return_tensors="pt", add_special_tokens=True
         )
         input_ids = input_ids.to(self._device)
 
-        # Generate with logprobs
-        with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                do_sample=True if temperature > 0 else False,
-                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
-                return_dict_in_generate=True,
-                output_scores=return_logprobs,
-            )
+        # Build generation kwargs
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": do_sample,
+            "pad_token_id": self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+            "return_dict_in_generate": True,
+            "output_scores": True,
+        }
+        if do_sample:
+            gen_kwargs["temperature"] = temperature
+            if top_k is not None:
+                gen_kwargs["top_k"] = top_k
+            if top_p is not None:
+                gen_kwargs["top_p"] = top_p
+
+        outputs = self.model.generate(input_ids, **gen_kwargs)
+
+        generation_time_ms = (time.time() - start_time) * 1000
 
         # Extract generated tokens (excluding input)
-        generated_ids = outputs.sequences[0][len(input_ids[0]) :]
-        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
+        generated_ids: list[int] = outputs.sequences[0][len(input_ids[0]) :].tolist()
+        generated_text = self.tokenizer.decode(
+            generated_ids, skip_special_tokens=False
+        )
+        generated_tokens = [self.tokenizer.decode([tid]) for tid in generated_ids]
 
-        # Decode individual tokens
-        token_strings = [self.tokenizer.decode([tid]) for tid in generated_ids]
+        # Extract log probabilities and top-k alternatives
+        token_log_probs: list[float] = []
+        top_k_tokens_list: list[list[int]] = []
+        top_k_probs_list: list[list[float]] = []
 
-        # Determine finish reason
-        finish_reason = "stop"
-        if len(generated_ids) >= max_tokens:
-            finish_reason = "length"
-        elif generated_ids[-1].item() == self.tokenizer.eos_token_id:
-            finish_reason = "eos"
-
-        result = {
-            "generated_text": generated_text,
-            "tokens": generated_ids.cpu().tolist(),
-            "token_strings": token_strings,
-            "num_tokens": len(generated_ids),
-            "finish_reason": finish_reason,
-        }
-
-        # Add log probabilities if requested
-        if return_logprobs and hasattr(outputs, "scores") and outputs.scores:
-            token_logprobs = []
-            top_logprobs_data = []
-
+        if hasattr(outputs, "scores") and outputs.scores:
             for i, score in enumerate(outputs.scores):
-                # Get log probabilities
+                if i >= len(generated_ids):
+                    break
+
                 log_probs = F.log_softmax(score[0], dim=-1)
 
-                # Get log prob for the selected token
-                selected_token = generated_ids[i].item()
-                token_logprob = log_probs[selected_token].item()
-                token_logprobs.append(token_logprob)
+                # Log prob for the selected token
+                token_log_probs.append(log_probs[generated_ids[i]].item())
 
-                # Get top-k alternatives
-                top_k_logprobs, top_k_indices = torch.topk(
-                    log_probs, k=min(10, len(log_probs))
-                )
-                top_alternatives = [
-                    {
-                        "token_id": int(top_k_indices[j]),
-                        "token_str": self.tokenizer.decode([top_k_indices[j]]),
-                        "logprob": float(top_k_logprobs[j]),
-                    }
-                    for j in range(len(top_k_indices))
-                ]
-                top_logprobs_data.append(top_alternatives)
+                # Top-k alternatives
+                k = min(capture_top_k, log_probs.shape[-1])
+                top_k_logprobs, top_k_indices = torch.topk(log_probs, k=k)
+                top_k_tokens_list.append(top_k_indices.tolist())
+                top_k_probs_list.append(top_k_logprobs.tolist())
 
-            result["token_logprobs"] = token_logprobs
-            result["top_logprobs"] = top_logprobs_data
-            result["cumulative_logprob"] = sum(token_logprobs)
-            result["mean_logprob"] = (
-                sum(token_logprobs) / len(token_logprobs) if token_logprobs else 0.0
-            )
-
-        return result
+        return GenerationResult(
+            generated_text=generated_text,
+            generated_token_ids=generated_ids,
+            generated_tokens=generated_tokens,
+            token_log_probs=token_log_probs,
+            top_k_tokens=top_k_tokens_list,
+            top_k_probs=top_k_probs_list,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+            generation_time_ms=generation_time_ms,
+        )
