@@ -1,7 +1,3 @@
-"""Command-line interface for cleanslate."""
-
-from typing import Optional
-
 try:
     import typer
     from rich.console import Console
@@ -13,19 +9,59 @@ except ImportError:
 
 from cleanslate.experiment import Experiment
 from cleanslate.generation import GenerationExperiment
-from cleanslate.jailbreak import JailbreakExperiment
 from cleanslate.results import ExperimentResults
 from cleanslate.samples.shakespeare import SHAKESPEARE_SAMPLES
 from cleanslate.samples.books import BOOK_SAMPLES
-from cleanslate.samples.billboard import load_billboard_songs
-from cleanslate.prompts import ALL_TEMPLATES
-from cleanslate.evaluation import evaluate_jailbreak_results, summarize_evaluations, print_evaluation_summary
+from cleanslate.samples.songs import SONG_SAMPLES
+from cleanslate.samples.billboard import (
+    load_billboard_dataset,
+    DATASET_ID,
+    DEFAULT_DATASET_SPLIT,
+)
+from cleanslate.prompts import ALL_TEMPLATES, ALL_SEED_MODES
+from cleanslate.prompt_dataset import build_prompt_splits
 
 app = typer.Typer(
     name="cleanslate",
     help="Sequence likelihood estimation for LLMs - measure memorization and token probabilities.",
 )
 console = Console()
+
+
+def _parse_templates(value: str | list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = [value]
+    template_list: list[str] = []
+    for item in raw_items:
+        template_list.extend([t.strip() for t in item.split(",") if t.strip()])
+    for t in template_list:
+        if t not in ALL_TEMPLATES:
+            raise typer.BadParameter(
+                f"Unknown template: {t}. Available: {list(ALL_TEMPLATES.keys())}"
+            )
+    return template_list
+
+
+def _parse_seed_modes(value: str | list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = [value]
+    seed_mode_list: list[str] = []
+    for item in raw_items:
+        seed_mode_list.extend([s.strip() for s in item.split(",") if s.strip()])
+    for s in seed_mode_list:
+        if s not in ALL_SEED_MODES:
+            raise typer.BadParameter(
+                f"Unknown seed mode: {s}. Available: {ALL_SEED_MODES}"
+            )
+    return seed_mode_list
 
 
 @app.command()
@@ -35,10 +71,10 @@ def run(
         "shakespeare", "--dataset", "-d", help="Dataset: shakespeare, books, or all"
     ),
     name: str = typer.Option("experiment", "--name", "-n", help="Experiment name"),
-    output: Optional[str] = typer.Option(
+    output: str | None = typer.Option(
         None, "--output", "-o", help="Output JSON file path"
     ),
-    device: Optional[str] = typer.Option(
+    device: str | None = typer.Option(
         None, "--device", help="Device: cpu, cuda, mps, or auto"
     ),
 ):
@@ -79,7 +115,7 @@ def probe(
     seed: str = typer.Argument(..., help="Seed/prompt text"),
     target: str = typer.Argument(..., help="Target continuation text"),
     model: str = typer.Option("Qwen/Qwen3-0.6B", "--model", "-m", help="Model name"),
-    device: Optional[str] = typer.Option(
+    device: str | None = typer.Option(
         None, "--device", help="Device: cpu, cuda, mps"
     ),
 ):
@@ -177,17 +213,17 @@ def generate(
     temperature: float = typer.Option(
         1.0, "--temperature", "-t", help="Sampling temperature"
     ),
-    top_p: Optional[float] = typer.Option(
+    top_p: float | None = typer.Option(
         None, "--top-p", help="Nucleus sampling (top-p)"
     ),
-    top_k: Optional[int] = typer.Option(None, "--top-k", help="Top-k sampling"),
+    top_k: int | None = typer.Option(None, "--top-k", help="Top-k sampling"),
     batch_size: int = typer.Option(8, "--batch-size", help="Batch size for generation"),
-    hf_repo: Optional[str] = typer.Option(
+    hf_repo: str | None = typer.Option(
         None,
         "--hf-repo",
         help="Push to HuggingFace Hub repo (e.g. unlearning-cleanslate/generations)",
     ),
-    device: Optional[str] = typer.Option(
+    device: str | None = typer.Option(
         None, "--device", help="Device: cpu, cuda, mps, or auto"
     ),
 ):
@@ -245,236 +281,212 @@ def generate(
 
 
 @app.command()
-def jailbreak(
-    model: str = typer.Option("Qwen/Qwen3-0.6B", "--model", "-m", help="Model name"),
-    output: str = typer.Option(
-        "outputs/jailbreak", "--output", "-o", help="Output base path"
+def build_prompts(
+    dataset_id: str = typer.Option(
+        DATASET_ID, "--dataset-id", help="HuggingFace dataset ID"
     ),
-    year_start: int = typer.Option(
-        2021, "--year-start", help="Start year for songs (inclusive)"
+    dataset_split: str = typer.Option(
+        DEFAULT_DATASET_SPLIT, "--dataset-split", help="Dataset split name"
     ),
-    year_end: int = typer.Option(
-        2022, "--year-end", help="End year for songs (inclusive)"
+    year_start: int | None = typer.Option(
+        None, "--year-start", help="Start year (optional)"
     ),
-    limit: int = typer.Option(
-        50, "--limit", "-n", help="Maximum number of songs to test"
+    year_end: int | None = typer.Option(
+        None, "--year-end", help="End year (optional)"
     ),
-    templates: Optional[str] = typer.Option(
-        None, "--templates", "-t", 
-        help="Comma-separated template names (default: direct,helpful_assistant,music_expert,educational)"
-    ),
-    seed_modes: Optional[str] = typer.Option(
-        None, "--seed-modes", "-s",
-        help="Comma-separated seed modes: none,first_line,first_verse,half (default: none,first_line)"
-    ),
-    num_generations: int = typer.Option(
-        1, "--num-generations", help="Generations per (song, template, seed_mode)"
-    ),
-    max_tokens: int = typer.Option(
-        8192, "--max-tokens", help="Maximum tokens to generate"
-    ),
-    temperature: float = typer.Option(
-        0.6, "--temperature", help="Sampling temperature"
-    ),
-    batch_size: int = typer.Option(
-        32, "--batch-size", "-b", help="Batch size for generation"
-    ),
-    device: Optional[str] = typer.Option(
-        None, "--device", help="Device: cpu, cuda, mps, or auto"
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Maximum number of songs"
     ),
     shuffle: bool = typer.Option(
-        True, "--shuffle/--no-shuffle", help="Shuffle songs before selecting"
+        False, "--shuffle/--no-shuffle", help="Shuffle before selecting"
+    ),
+    seed: int = typer.Option(42, "--seed", help="Shuffle seed"),
+    templates: list[str] | None = typer.Option(
+        None,
+        "--templates",
+        "-t",
+        help="Comma-separated template names (default: all)",
+        callback=_parse_templates,
+    ),
+    seed_modes: list[str] | None = typer.Option(
+        None,
+        "--seed-modes",
+        "-s",
+        help="Comma-separated seed modes (default: none,first_line)",
+        callback=_parse_seed_modes,
+    ),
+    require_lyrics: bool = typer.Option(
+        True, "--require-lyrics/--no-require-lyrics", help="Drop rows without lyrics"
+    ),
+    output_repo: str | None = typer.Option(
+        None,
+        "--output-repo",
+        help="HuggingFace dataset repo to push (e.g. org/prompts)",
+    ),
+    output_dir: str | None = typer.Option(
+        None, "--output-dir", help="Local directory to save DatasetDict"
     ),
 ):
-    """Run jailbreak experiment on Billboard songs.
-    
-    Tests different prompt templates and seed modes to measure
-    how much lyrics models will reproduce.
-    
-    Examples:
-        cleanslate jailbreak -m Qwen/Qwen3-0.6B -n 20
-        cleanslate jailbreak -m meta-llama/Llama-3-8B --year-start 2020 -t direct,music_expert
-        cleanslate jailbreak -m google/gemma-2-9b -s none,first_line,first_verse
-    """
-    
-    # Load songs
-    console.print(f"[bold]Loading Billboard songs ({year_start}-{year_end})...[/bold]")
-    try:
-        songs = load_billboard_songs(
-            year_range=(year_start, year_end),
-            limit=limit,
-            shuffle=shuffle,
-        )
-    except FileNotFoundError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-    
-    console.print(f"Loaded {len(songs)} songs")
-    
-    # Parse templates
-    if templates:
-        template_list = [t.strip() for t in templates.split(",")]
-        for t in template_list:
-            if t not in ALL_TEMPLATES:
-                console.print(f"[red]Unknown template: {t}[/red]")
-                console.print(f"Available: {list(ALL_TEMPLATES.keys())}")
-                raise typer.Exit(1)
-    else:
-        template_list = ["direct", "helpful_assistant", "music_expert", "educational"]
-    
-    # Parse seed modes
-    if seed_modes:
-        seed_mode_list = [s.strip() for s in seed_modes.split(",")]
-        valid_modes = {"none", "first_line", "first_verse", "half"}
-        for s in seed_mode_list:
-            if s not in valid_modes:
-                console.print(f"[red]Unknown seed mode: {s}[/red]")
-                console.print(f"Available: {valid_modes}")
-                raise typer.Exit(1)
-    else:
-        seed_mode_list = ["none", "first_line"]
-    
-    total_gens = len(songs) * len(template_list) * len(seed_mode_list) * num_generations
-    
-    console.print()
-    console.print("[bold]Jailbreak Experiment Configuration[/bold]")
-    console.print(f"  Model: {model}")
-    console.print(f"  Songs: {len(songs)} ({year_start}-{year_end})")
-    console.print(f"  Templates: {template_list}")
-    console.print(f"  Seed modes: {seed_mode_list}")
-    console.print(f"  Generations per config: {num_generations}")
-    console.print(f"  Total generations: {total_gens}")
-    console.print(f"  Output: {output}")
-    console.print()
-    
-    # Run experiment
-    exp = JailbreakExperiment(
-        model=model,
-        device=device,
-        experiment_name=f"jailbreak_{year_start}_{year_end}",
+    """Build prompt splits from the Billboard dataset."""
+    console.print(
+        f"[bold]Loading dataset:[/bold] {dataset_id} ({dataset_split})"
     )
-    
-    rows = exp.run(
-        songs=songs,
-        templates=template_list,
-        seed_modes=seed_mode_list,
+
+    if (year_start is None) ^ (year_end is None):
+        raise typer.BadParameter(
+            "Provide both --year-start and --year-end, or neither."
+        )
+    year_range = (year_start, year_end) if year_start is not None else None
+
+    ds = load_billboard_dataset(
+        dataset_id=dataset_id,
+        dataset_split=dataset_split,
+        year_range=year_range,
+        limit=limit,
+        require_lyrics=require_lyrics,
+        shuffle=shuffle,
+        seed=seed,
+    )
+
+    template_list = templates or list(ALL_TEMPLATES.keys())
+    seed_mode_list = seed_modes or ALL_SEED_MODES
+
+    console.print(
+        f"[bold]Building splits:[/bold] {len(template_list)} templates x "
+        f"{len(seed_mode_list)} seed modes"
+    )
+
+    ds_dict = build_prompt_splits(ds, template_list, seed_mode_list)
+
+    for split_name, split_ds in ds_dict.items():
+        console.print(f"  Split '{split_name}': {len(split_ds)} rows")
+
+    if output_dir:
+        ds_dict.save_to_disk(output_dir)
+        console.print(f"[green]Saved to {output_dir}[/green]")
+
+    if output_repo:
+        ds_dict.push_to_hub(output_repo)
+        console.print(
+            f"[green]Pushed to https://huggingface.co/datasets/{output_repo}[/green]"
+        )
+
+    if not output_dir and not output_repo:
+        console.print(
+            "[yellow]No output specified. Use --output-dir and/or --output-repo to save.[/yellow]"
+        )
+
+
+@app.command()
+def generate_prompts(
+    prompts_dataset_id: str = typer.Option(
+        ..., "--prompts-dataset-id", help="HuggingFace prompt dataset ID or local path"
+    ),
+    split: str = typer.Option(
+        "direct__none", "--split", help="Prompt split (<template>__<seed_mode>)"
+    ),
+    seed_modes: list[str] | None = typer.Option(
+        None,
+        "--seed-modes",
+        "-s",
+        help="Comma-separated seed modes to include",
+        callback=_parse_seed_modes,
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Maximum number of rows"
+    ),
+    shuffle: bool = typer.Option(
+        False, "--shuffle/--no-shuffle", help="Shuffle before selecting"
+    ),
+    seed: int = typer.Option(42, "--seed", help="Shuffle seed"),
+    model: str = typer.Option("Qwen/Qwen3-0.6B", "--model", "-m", help="Model name"),
+    backend: str = typer.Option(
+        "sglang", "--backend", "-b", help="Backend: sglang or huggingface"
+    ),
+    thinking: bool = typer.Option(
+        False, "--thinking/--no-thinking", help="Enable model thinking mode"
+    ),
+    num_generations: int = typer.Option(
+        1, "--num-generations", help="Generations per prompt"
+    ),
+    max_tokens: int = typer.Option(
+        512, "--max-tokens", help="Maximum tokens per generation"
+    ),
+    temperature: float = typer.Option(
+        0.7, "--temperature", help="Sampling temperature"
+    ),
+    top_p: float | None = typer.Option(
+        0.95, "--top-p", help="Nucleus sampling (top-p)"
+    ),
+    top_k: int | None = typer.Option(20, "--top-k", help="Top-k sampling"),
+    batch_size: int = typer.Option(8, "--batch-size", help="Batch size"),
+    output: str = typer.Option(
+        "outputs/prompts_generations",
+        "--output",
+        "-o",
+        help="Local output base path",
+    ),
+    output_repo: str | None = typer.Option(
+        None,
+        "--output-repo",
+        help="HuggingFace dataset repo to push outputs",
+    ),
+    output_config: str | None = typer.Option(
+        None,
+        "--output-config",
+        help="Dataset config name for HF push (default: sanitized model name)",
+    ),
+):
+    """Generate from a prompt split dataset and optionally push outputs to HF."""
+    from pathlib import Path
+    from datasets import load_dataset, load_from_disk
+
+    if Path(prompts_dataset_id).exists():
+        ds_dict = load_from_disk(prompts_dataset_id)
+        if split not in ds_dict:
+            console.print(f"[red]Split not found: {split}[/red]")
+            console.print(f"Available: {list(ds_dict.keys())}")
+            raise typer.Exit(1)
+        ds = ds_dict[split]
+    else:
+        ds = load_dataset(prompts_dataset_id, split=split)
+
+    if seed_modes:
+        ds = ds.filter(lambda x: x.get("seed_mode") in seed_modes)
+
+    if shuffle:
+        ds = ds.shuffle(seed=seed)
+
+    if limit:
+        ds = ds.select(range(min(limit, len(ds))))
+
+    rows = list(ds)
+
+    console.print(f"[bold]Loaded[/bold] {len(rows)} prompts from split '{split}'")
+
+    if not output_config:
+        output_config = model.replace("/", "__")
+
+    exp = GenerationExperiment(model=model, backend=backend)
+    exp.run(
+        samples=rows,
+        dataset_name=output_config,
         output_path=output,
         num_generations=num_generations,
         max_new_tokens=max_tokens,
         temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
         batch_size=batch_size,
-        top_p=0.95,
-        top_k=20,
-        do_sample=True, 
+        hf_repo=output_repo,
+        thinking=thinking,
     )
-    
-    console.print()
-    console.print(f"[bold green]Completed {len(rows)} generations[/bold green]")
-    console.print(f"Results saved to: {output}.parquet and {output}.json")
-    
-    # Show sample
-    if rows:
-        console.print()
-        console.print("[bold]Sample output:[/bold]")
-        sample = rows[0]
-        console.print(f"[dim]Song:[/dim] {sample.song_name}")
-        console.print(f"[dim]Template:[/dim] {sample.prompt_template}")
-        console.print(f"[dim]Seed mode:[/dim] {sample.seed_mode}")
-        console.print(f"[dim]Generated:[/dim] {sample.generated_text[:300]}...")
 
-
-@app.command()
-def evaluate(
-    results_path: str = typer.Argument(..., help="Path to jailbreak results (parquet or json)"),
-    output: Optional[str] = typer.Option(
-        None, "--output", "-o", help="Output path for evaluation results"
-    ),
-    group_by: str = typer.Option(
-        "both", "--group-by", "-g", 
-        help="Group results by: template, seed_mode, or both"
-    ),
-):
-    """Evaluate jailbreak experiment results.
-    
-    Computes metrics comparing generated text to ground truth lyrics:
-    - BLEU-1, BLEU-2: N-gram precision
-    - ROUGE-1, ROUGE-L: N-gram recall/F1
-    - Exact match, line match rates
-    
-    Examples:
-        cleanslate evaluate outputs/jailbreak.parquet
-        cleanslate evaluate results.json -o eval_results.json --group-by template
-    """
-    from pathlib import Path
-    
-    path = Path(results_path)
-    if not path.exists():
-        console.print(f"[red]File not found: {results_path}[/red]")
-        raise typer.Exit(1)
-    
-    console.print(f"[bold]Evaluating results from {results_path}...[/bold]")
-    
-    # Run evaluation
-    eval_results = evaluate_jailbreak_results(results_path, output)
-    
-    console.print(f"Evaluated {len(eval_results)} generations")
-    
-    # Summarize and print
-    if group_by not in ("template", "seed_mode", "both"):
-        console.print(f"[red]Invalid group_by: {group_by}. Use: template, seed_mode, or both[/red]")
-        raise typer.Exit(1)
-    
-    summary = summarize_evaluations(eval_results, group_by=group_by)
-    print_evaluation_summary(summary)
-
-
-@app.command()
-def list_templates():
-    """List available prompt templates for jailbreak experiments."""
-    
-    console.print("[bold]Available Prompt Templates:[/bold]")
-    console.print()
-    
-    for name, template in ALL_TEMPLATES.items():
-        console.print(f"[cyan]{name}[/cyan]")
-        console.print(f"  {template.description}")
-        if template.system_prompt:
-            # Truncate long system prompts
-            sp = template.system_prompt[:100] + "..." if len(template.system_prompt) > 100 else template.system_prompt
-            console.print(f"  [dim]System: {sp}[/dim]")
-        console.print()
-
-
-@app.command()
-def list_billboard(
-    year_start: int = typer.Option(1970, "--year-start", help="Start year"),
-    year_end: int = typer.Option(2025, "--year-end", help="End year"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Number of songs to show"),
-):
-    """List Billboard songs from the dataset."""
-    
-    try:
-        songs = load_billboard_songs(
-            year_range=(year_start, year_end),
-            limit=limit,
-            shuffle=False,
+    console.print(f"[green]Saved outputs to {output}.parquet[/green]")
+    if output_repo:
+        console.print(
+            f"[green]Pushed to https://huggingface.co/datasets/{output_repo}[/green]"
         )
-    except FileNotFoundError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-    
-    console.print(f"[bold]Billboard Songs ({year_start}-{year_end}):[/bold]")
-    console.print()
-    
-    for i, song in enumerate(songs, 1):
-        artists = ", ".join(song["artists"]) if song["artists"] else "Unknown"
-        lyrics_preview = song["lyrics"][:50] + "..." if len(song["lyrics"]) > 50 else song["lyrics"]
-        lyrics_preview = lyrics_preview.replace("\n", " ")
-        
-        console.print(f"[cyan]{i}. {song['title']}[/cyan] - {artists} ({song['year']})")
-        console.print(f"   [dim]{lyrics_preview}[/dim]")
-        console.print()
-
 
 def main():
     """Entry point for CLI."""

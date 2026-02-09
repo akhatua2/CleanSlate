@@ -5,13 +5,15 @@ without computing metrics. Designed for HuggingFace Datasets compatibility.
 """
 
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from tqdm import tqdm
+
 from cleanslate.backends.base import InferenceBackend
-from cleanslate.backends.huggingface import HuggingFaceBackend
+from cleanslate.backends import create_backend
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,19 @@ class GenerationRow:
     device: str
     generation_time_ms: float
 
+    # Song metadata (optional)
+    song_id: str | None = None
+    song_title: str | None = None
+    song_artists: list[str] = field(default_factory=list)
+    song_year: int | None = None
+    wikipedia_link: str | None = None
+
+    # Prompt metadata (optional)
+    prompt_id: str | None = None
+    prompt_template: str | None = None
+    seed_mode: str | None = None
+    lyrics_hint: str | None = None
+
     def to_dict(self) -> dict:
         """Convert to dict for DataFrame/parquet."""
         return asdict(self)
@@ -81,31 +96,29 @@ class GenerationExperiment:
     def __init__(
         self,
         model: str,
-        backend: BackendType = "huggingface",
+        backend: BackendType | InferenceBackend = "huggingface",
         device: str | None = None,
         **backend_kwargs,
     ):
         self.model_name = model
-        self._backend_type = backend
         self._device = device
         self._backend_kwargs = backend_kwargs
         self._backend: InferenceBackend | None = None
+        if isinstance(backend, InferenceBackend):
+            self._backend = backend
+            self._backend_type = "custom"
+        else:
+            self._backend_type = backend
 
     def _get_backend(self) -> InferenceBackend:
         """Lazy-load the model."""
         if self._backend is None:
-            if self._backend_type == "huggingface":
-                self._backend = HuggingFaceBackend(self.model_name, device=self._device)
-            elif self._backend_type == "vllm":
-                from cleanslate.backends.vllm_backend import VLLMBackend
-
-                self._backend = VLLMBackend(self.model_name)
-            elif self._backend_type == "sglang":
-                from cleanslate.backends.sglang_backend import SGLangBackend
-
-                self._backend = SGLangBackend(self.model_name, **self._backend_kwargs)
-            else:
-                raise ValueError(f"Unknown backend: {self._backend_type}")
+            self._backend = create_backend(
+                self._backend_type,
+                self.model_name,
+                device=self._device,
+                **self._backend_kwargs,
+            )
         return self._backend
 
     def run(
@@ -122,12 +135,14 @@ class GenerationExperiment:
         capture_top_k: int = 50,
         batch_size: int = 8,
         hf_repo: str | None = None,
+        thinking: bool = False,
     ) -> list[GenerationRow]:
         """
         Run generation on all samples and save to parquet.
 
         Args:
-            samples: List of dicts with keys: name, seed, target (optional)
+            samples: List of dicts with keys: name, seed, target (optional).
+                     If "messages" is provided, it will be formatted as chat.
             dataset_name: Name for the dataset (e.g., "shakespeare")
             output_path: Path to save parquet file
             num_generations: Number of generations per seed
@@ -138,6 +153,7 @@ class GenerationExperiment:
             do_sample: Whether to sample (vs greedy)
             capture_top_k: Number of top tokens to save per position
             batch_size: Number of sequences to generate in parallel
+            thinking: Enable model thinking mode when formatting chat prompts
 
         Returns:
             List of GenerationRow objects
@@ -146,14 +162,38 @@ class GenerationExperiment:
         rows: list[GenerationRow] = []
 
         # Build flat list of all generation jobs
-        # Each job: (sample_idx, gen_idx, sample_name, seed, reference_target)
-        jobs: list[tuple[int, int, str, str, str]] = []
+        # Each job: (sample_idx, gen_idx, sample_name, seed, reference_target, metadata)
+        jobs: list[tuple[int, int, str, str, str, dict]] = []
         for sample_idx, sample in enumerate(samples):
-            sample_name = sample.get("name", "unnamed")
-            seed = sample["seed"]
+            sample_name = sample.get("sample_name", sample.get("name", "unnamed"))
+            if sample.get("messages"):
+                if not hasattr(backend, "format_chat"):
+                    raise ValueError(
+                        f"Backend {self._backend_type} does not support chat formatting"
+                    )
+                seed = backend.format_chat(
+                    sample["messages"],
+                    add_generation_prompt=True,
+                    enable_thinking=thinking,
+                )
+            else:
+                seed = sample["seed"]
             reference_target = sample.get("target", "")
+            metadata = {
+                "song_id": sample.get("song_id"),
+                "song_title": sample.get("song_title"),
+                "song_artists": sample.get("song_artists") or [],
+                "song_year": sample.get("song_year"),
+                "wikipedia_link": sample.get("wikipedia_link"),
+                "prompt_id": sample.get("prompt_id"),
+                "prompt_template": sample.get("prompt_template"),
+                "seed_mode": sample.get("seed_mode"),
+                "lyrics_hint": sample.get("lyrics_hint"),
+            }
             for gen_idx in range(num_generations):
-                jobs.append((sample_idx, gen_idx, sample_name, seed, reference_target))
+                jobs.append(
+                    (sample_idx, gen_idx, sample_name, seed, reference_target, metadata)
+                )
 
         total_jobs = len(jobs)
         num_batches = (total_jobs + batch_size - 1) // batch_size
@@ -165,7 +205,7 @@ class GenerationExperiment:
             batch_size,
         )
 
-        for batch_idx in range(num_batches):
+        for batch_idx in tqdm(range(num_batches), desc="Batches", unit="batch"):
             batch_start = batch_idx * batch_size
             batch_end = min(batch_start + batch_size, total_jobs)
             batch_jobs = jobs[batch_start:batch_end]
@@ -194,7 +234,14 @@ class GenerationExperiment:
             # Create rows for each result
             timestamp = datetime.now().isoformat()
             for job, result in zip(batch_jobs, results):
-                sample_idx, gen_idx, sample_name, seed, reference_target = job
+                (
+                    sample_idx,
+                    gen_idx,
+                    sample_name,
+                    seed,
+                    reference_target,
+                    metadata,
+                ) = job
 
                 row = GenerationRow(
                     model_name=self.model_name,
@@ -217,6 +264,15 @@ class GenerationExperiment:
                     timestamp=timestamp,
                     device=backend.device,
                     generation_time_ms=result.generation_time_ms,
+                    song_id=metadata.get("song_id"),
+                    song_title=metadata.get("song_title"),
+                    song_artists=metadata.get("song_artists") or [],
+                    song_year=metadata.get("song_year"),
+                    wikipedia_link=metadata.get("wikipedia_link"),
+                    prompt_id=metadata.get("prompt_id"),
+                    prompt_template=metadata.get("prompt_template"),
+                    seed_mode=metadata.get("seed_mode"),
+                    lyrics_hint=metadata.get("lyrics_hint"),
                 )
                 rows.append(row)
 
