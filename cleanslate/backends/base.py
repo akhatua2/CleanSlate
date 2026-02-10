@@ -1,7 +1,13 @@
-"""Abstract base class for inference backends."""
-
 from abc import ABC, abstractmethod
+from pydantic import BaseModel, Field
 from dataclasses import dataclass, field
+
+
+class SongGenerationOutput(BaseModel):
+    song_name: str = Field(description="The name of the song we are discussing")
+    song_year: str = Field(description="The year the song was released")
+    artist_names: list[str] = Field(description="List of the artists who performed the song")
+    lyrics: str = Field(description="The lyrics of the song")
 
 
 @dataclass
@@ -31,6 +37,8 @@ class GenerationResult:
     temperature: float = 1.0
     top_p: float | None = None
     top_k: int | None = None
+    min_p: float | None = None
+    repetition_penalty: float | None = None
     do_sample: bool = True
 
     # Timing
@@ -151,6 +159,8 @@ class InferenceBackend(ABC):
         temperature: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
         do_sample: bool = True,
         capture_top_k: int = 50,
     ) -> GenerationResult:
@@ -163,6 +173,8 @@ class InferenceBackend(ABC):
             temperature: Sampling temperature (higher = more random)
             top_k: Top-k filtering for sampling
             top_p: Nucleus sampling threshold
+            min_p: Min-p sampling (keep tokens with prob >= min_p * max_prob)
+            repetition_penalty: Penalize repeated tokens (1.0 = no penalty, >1.0 = less repetition)
             do_sample: Whether to sample (vs greedy decode)
             capture_top_k: Number of top tokens/probs to capture per position
 
@@ -178,6 +190,8 @@ class InferenceBackend(ABC):
         temperature: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
         do_sample: bool = True,
         capture_top_k: int = 50,
     ) -> list[GenerationResult]:
@@ -192,6 +206,8 @@ class InferenceBackend(ABC):
             temperature: Sampling temperature
             top_k: Top-k filtering for sampling
             top_p: Nucleus sampling threshold
+            min_p: Min-p sampling (keep tokens with prob >= min_p * max_prob)
+            repetition_penalty: Penalize repeated tokens (1.0 = no penalty, >1.0 = less repetition)
             do_sample: Whether to sample (vs greedy decode)
             capture_top_k: Number of top tokens/probs to capture per position
 
@@ -205,6 +221,8 @@ class InferenceBackend(ABC):
                 temperature,
                 top_k,
                 top_p,
+                min_p,
+                repetition_penalty,
                 do_sample,
                 capture_top_k,
             )

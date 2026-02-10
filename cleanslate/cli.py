@@ -7,19 +7,23 @@ except ImportError:
         "CLI dependencies not installed. Install with: pip install cleanslate[cli]"
     )
 
+from pathlib import Path
+
+from datasets import DatasetDict, load_dataset, load_from_disk
+
 from cleanslate.experiment import Experiment
 from cleanslate.generation import GenerationExperiment
+from cleanslate.prompt_dataset import build_prompt_splits
+from cleanslate.prompts import ALL_SEED_MODES, ALL_TEMPLATES
 from cleanslate.results import ExperimentResults
-from cleanslate.samples.shakespeare import SHAKESPEARE_SAMPLES
-from cleanslate.samples.books import BOOK_SAMPLES
-from cleanslate.samples.songs import SONG_SAMPLES
 from cleanslate.samples.billboard import (
-    load_billboard_dataset,
     DATASET_ID,
     DEFAULT_DATASET_SPLIT,
+    load_billboard_dataset,
 )
-from cleanslate.prompts import ALL_TEMPLATES, ALL_SEED_MODES
-from cleanslate.prompt_dataset import build_prompt_splits
+from cleanslate.samples.books import BOOK_SAMPLES
+from cleanslate.samples.shakespeare import SHAKESPEARE_SAMPLES
+from cleanslate.samples.songs import SONG_SAMPLES
 
 app = typer.Typer(
     name="cleanslate",
@@ -115,9 +119,7 @@ def probe(
     seed: str = typer.Argument(..., help="Seed/prompt text"),
     target: str = typer.Argument(..., help="Target continuation text"),
     model: str = typer.Option("Qwen/Qwen3-0.6B", "--model", "-m", help="Model name"),
-    device: str | None = typer.Option(
-        None, "--device", help="Device: cpu, cuda, mps"
-    ),
+    device: str | None = typer.Option(None, "--device", help="Device: cpu, cuda, mps"),
 ):
     """Probe a single seed/target pair."""
 
@@ -217,6 +219,19 @@ def generate(
         None, "--top-p", help="Nucleus sampling (top-p)"
     ),
     top_k: int | None = typer.Option(None, "--top-k", help="Top-k sampling"),
+    min_p: float = typer.Option(
+        0, "--min-p", help="Min-p sampling (keep tokens with prob >= min_p * max_prob)"
+    ),
+    repetition_penalty: float | None = typer.Option(
+        None,
+        "--repetition-penalty",
+        help="Penalize repeated tokens",
+    ),
+    capture_top_k: int = typer.Option(
+        50,
+        "--capture-top-k",
+        help="Top-k alternatives to capture per position (0 = logprobs only, faster)",
+    ),
     batch_size: int = typer.Option(8, "--batch-size", help="Batch size for generation"),
     hf_repo: str | None = typer.Option(
         None,
@@ -256,6 +271,7 @@ def generate(
         f"{num_generations * len(samples)} total"
     )
     console.print(f"[bold]Batch size:[/bold] {batch_size}")
+    console.print(f"[bold]Capture top-k:[/bold] {capture_top_k}")
     console.print()
 
     exp = GenerationExperiment(model=model, backend=backend, device=device)
@@ -268,10 +284,13 @@ def generate(
         temperature=temperature,
         top_k=top_k,
         top_p=top_p,
+        min_p=min_p,
+        repetition_penalty=repetition_penalty,
+        capture_top_k=capture_top_k,
         batch_size=batch_size,
         hf_repo=hf_repo,
     )
-    
+
     console.print()
     console.print(f"[green]Saved {len(rows)} generations to {output}[/green]")
     if hf_repo:
@@ -291,9 +310,7 @@ def build_prompts(
     year_start: int | None = typer.Option(
         None, "--year-start", help="Start year (optional)"
     ),
-    year_end: int | None = typer.Option(
-        None, "--year-end", help="End year (optional)"
-    ),
+    year_end: int | None = typer.Option(None, "--year-end", help="End year (optional)"),
     limit: int | None = typer.Option(
         None, "--limit", "-n", help="Maximum number of songs"
     ),
@@ -328,9 +345,7 @@ def build_prompts(
     ),
 ):
     """Build prompt splits from the Billboard dataset."""
-    console.print(
-        f"[bold]Loading dataset:[/bold] {dataset_id} ({dataset_split})"
-    )
+    console.print(f"[bold]Loading dataset:[/bold] {dataset_id} ({dataset_split})")
 
     if (year_start is None) ^ (year_end is None):
         raise typer.BadParameter(
@@ -383,7 +398,9 @@ def generate_prompts(
         ..., "--prompts-dataset-id", help="HuggingFace prompt dataset ID or local path"
     ),
     split: str = typer.Option(
-        "direct__none", "--split", help="Prompt split (<template>__<seed_mode>)"
+        "direct__none",
+        "--split",
+        help="Prompt split (<template>__<seed_mode>), or 'all' to run every split",
     ),
     seed_modes: list[str] | None = typer.Option(
         None,
@@ -416,15 +433,35 @@ def generate_prompts(
         0.7, "--temperature", help="Sampling temperature"
     ),
     top_p: float | None = typer.Option(
-        0.95, "--top-p", help="Nucleus sampling (top-p)"
+        0.80, "--top-p", help="Nucleus sampling (top-p)"
     ),
     top_k: int | None = typer.Option(20, "--top-k", help="Top-k sampling"),
-    batch_size: int = typer.Option(8, "--batch-size", help="Batch size"),
+    min_p: float = typer.Option(
+        0,
+        "--min-p",
+        help="Min-p sampling (keep tokens with prob >= min_p * max_prob)",
+    ),
+    repetition_penalty: float | None = typer.Option(
+        None,
+        "--repetition-penalty",
+        help="Penalize repeated tokens (1.0 = no penalty, >1.0 = less repetition)",
+    ),
+    json_decoding: bool = typer.Option(
+        False,
+        "--json-decoding/--no-json-decoding",
+        help="Enable JSON schema for decoding",
+    ),
+    capture_top_k: int = typer.Option(
+        0,
+        "--capture-top-k",
+        help="Top-k alternatives to capture per position (0 = logprobs only, faster)",
+    ),
+    batch_size: int = typer.Option(128, "--batch-size", help="Batch size"),
     output: str = typer.Option(
         "outputs/prompts_generations",
         "--output",
         "-o",
-        help="Local output base path",
+        help="Output directory. Each split is saved as <output>/<split>.parquet",
     ),
     output_repo: str | None = typer.Option(
         None,
@@ -437,56 +474,107 @@ def generate_prompts(
         help="Dataset config name for HF push (default: sanitized model name)",
     ),
 ):
-    """Generate from a prompt split dataset and optionally push outputs to HF."""
-    from pathlib import Path
-    from datasets import load_dataset, load_from_disk
+    """Generate from a prompt split dataset and optionally push outputs to HF.
 
-    if Path(prompts_dataset_id).exists():
+    Use --split all to iterate over every split in the dataset.
+    Outputs are saved as <output>/<split>.parquet.
+    """
+    # ── Load dataset ──────────────────────────────────────────────────
+    is_local = Path(prompts_dataset_id).exists()
+    if is_local:
         ds_dict = load_from_disk(prompts_dataset_id)
+    else:
+        ds_dict = load_dataset(prompts_dataset_id)
+
+    if not isinstance(ds_dict, DatasetDict):
+        console.print(
+            "[red]Expected a DatasetDict (multiple splits). "
+            "Got a single Dataset instead.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # ── Resolve which splits to run ───────────────────────────────────
+    all_split_names = list(ds_dict.keys())
+
+    if split.lower() == "all":
+        splits_to_run = all_split_names
+    else:
         if split not in ds_dict:
             console.print(f"[red]Split not found: {split}[/red]")
-            console.print(f"Available: {list(ds_dict.keys())}")
+            console.print(f"Available: {all_split_names}")
             raise typer.Exit(1)
-        ds = ds_dict[split]
-    else:
-        ds = load_dataset(prompts_dataset_id, split=split)
-
-    if seed_modes:
-        ds = ds.filter(lambda x: x.get("seed_mode") in seed_modes)
-
-    if shuffle:
-        ds = ds.shuffle(seed=seed)
-
-    if limit:
-        ds = ds.select(range(min(limit, len(ds))))
-
-    rows = list(ds)
-
-    console.print(f"[bold]Loaded[/bold] {len(rows)} prompts from split '{split}'")
+        splits_to_run = [split]
 
     if not output_config:
         output_config = model.replace("/", "__")
 
-    exp = GenerationExperiment(model=model, backend=backend)
-    exp.run(
-        samples=rows,
-        dataset_name=output_config,
-        output_path=output,
-        num_generations=num_generations,
-        max_new_tokens=max_tokens,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-        batch_size=batch_size,
-        hf_repo=output_repo,
-        thinking=thinking,
+    console.print(f"[bold]Model:[/bold] {model}")
+    console.print(f"[bold]Backend:[/bold] {backend}")
+    console.print(
+        f"[bold]Splits:[/bold] {len(splits_to_run)} "
+        f"({', '.join(splits_to_run)})"
+    )
+    console.print()
+
+    # ── Create experiment once (model loads once) ─────────────────────
+    exp = GenerationExperiment(
+        model=model, backend=backend, json_decoding=json_decoding
     )
 
-    console.print(f"[green]Saved outputs to {output}.parquet[/green]")
+    output_dir = Path(output)
+
+    for split_name in splits_to_run:
+        ds = ds_dict[split_name]
+
+        if seed_modes:
+            ds = ds.filter(lambda x: x.get("seed_mode") in seed_modes)
+
+        if shuffle:
+            ds = ds.shuffle(seed=seed)
+
+        if limit:
+            ds = ds.select(range(min(limit, len(ds))))
+
+        rows = list(ds)
+
+        console.print(
+            f"[bold]Split '{split_name}':[/bold] {len(rows)} prompts"
+        )
+
+        split_output = output_dir / split_name
+
+        exp.run(
+            samples=rows,
+            dataset_name=output_config,
+            output_path=str(split_output),
+            num_generations=num_generations,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            capture_top_k=capture_top_k,
+            batch_size=batch_size,
+            hf_repo=output_repo,
+            thinking=thinking,
+        )
+
+        console.print(
+            f"[green]  ✓ Saved {len(rows)} generations → "
+            f"{split_output}.parquet[/green]"
+        )
+
+    console.print()
+    console.print(
+        f"[green bold]Done — {len(splits_to_run)} split(s) saved "
+        f"under {output_dir}/[/green bold]"
+    )
     if output_repo:
         console.print(
             f"[green]Pushed to https://huggingface.co/datasets/{output_repo}[/green]"
         )
+
 
 def main():
     """Entry point for CLI."""

@@ -6,7 +6,7 @@ song lyrics from language models with different framing strategies.
 
 from dataclasses import dataclass
 from typing import Callable, Literal
-
+from cleanslate.backends.base import SongGenerationOutput
 SeedMode = Literal["none", "first_line", "first_verse", "half"]
 
 
@@ -209,7 +209,7 @@ STRUCTURED_JSON = PromptTemplate(
         f"Artist: {_artists_str(song)}\n"
         f"Year: {song.get('year', 'unknown')}\n\n"
         f"Use this schema:\n"
-        f'{{"song_name": string, "artist": string, "lyrics": string}}'
+        f'{SongGenerationOutput.model_json_schema()}'
         + (f"\n\nThe lyrics start with:\n{hint}" if hint else "")
     ),
 )

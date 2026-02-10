@@ -14,6 +14,7 @@ Requires: pip install cleanslate[sglang]  (or uv sync --extra sglang)
 Important: Scripts using this backend MUST use `if __name__ == '__main__':` guard.
 """
 
+import json
 import logging
 import math
 import time
@@ -27,7 +28,12 @@ except ImportError:
         "or uv sync --extra sglang"
     )
 
-from cleanslate.backends.base import GenerationResult, InferenceBackend, ProbabilityResult
+from cleanslate.backends.base import (
+    GenerationResult,
+    InferenceBackend,
+    ProbabilityResult,
+    SongGenerationOutput,
+)
 from cleanslate.chat_format import format_chat as _format_chat
 
 logger = logging.getLogger(__name__)
@@ -40,17 +46,24 @@ class SGLangBackend(InferenceBackend):
     Supports native batch generation for full GPU utilization.
     """
 
-    def __init__(self, model_name: str, **engine_kwargs: Any) -> None:
-        self._model_name = model_name
+    _json_output: str | None = None
 
+    def __init__(
+        self, model_name: str, json_decoding: bool = False, **engine_kwargs: Any
+    ) -> None:
+        self._model_name = model_name
+        if json_decoding:
+            self._json_output = json.dumps(SongGenerationOutput.model_json_schema())
         defaults: dict[str, Any] = {
-            "trust_remote_code": True,
-            "mem_fraction_static": 0.85,
-            "disable_cuda_graph": True,
+            "mem_fraction_static": 0.92,
+            "disable_cuda_graph": False,
+            "cuda_graph_max_bs": 128,
+            "chunked_prefill_size": 8192,
         }
         defaults.update(engine_kwargs)
 
         logger.info("Loading %s with SGLang Engine...", model_name)
+        logger.info("JSON schema: %s", self._json_output)
         self.engine = Engine(model_path=model_name, **defaults)
         self.tokenizer = self.engine.tokenizer_manager.tokenizer
         logger.info("Model loaded with SGLang on CUDA.")
@@ -137,6 +150,8 @@ class SGLangBackend(InferenceBackend):
         temperature: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
         do_sample: bool = True,
         capture_top_k: int = 50,
     ) -> GenerationResult:
@@ -147,6 +162,8 @@ class SGLangBackend(InferenceBackend):
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
             do_sample=do_sample,
             capture_top_k=capture_top_k,
         )
@@ -159,6 +176,8 @@ class SGLangBackend(InferenceBackend):
         temperature: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
         do_sample: bool = True,
         capture_top_k: int = 50,
     ) -> list[GenerationResult]:
@@ -169,9 +188,7 @@ class SGLangBackend(InferenceBackend):
         """
         if not seeds:
             return []
-
         start_time = time.time()
-
         sampling_params: dict[str, Any] = {
             "max_new_tokens": max_new_tokens,
             "temperature": temperature if do_sample else 0.0,
@@ -180,13 +197,22 @@ class SGLangBackend(InferenceBackend):
             sampling_params["top_k"] = top_k
         if top_p is not None:
             sampling_params["top_p"] = top_p
+        if min_p is not None:
+            sampling_params["min_p"] = min_p
+        else:
+            sampling_params["min_p"] = 0.0
+        if repetition_penalty is not None:
+            sampling_params["repetition_penalty"] = repetition_penalty
+        if self._json_output:
+            sampling_params["json_schema"] = self._json_output
 
         # Single batched call - SGLang schedules all prompts concurrently
+        # NOTE: logprob_start_len omitted — we only need output token logprobs,
+        # not input (prefill) logprobs, so skipping saves prefill compute.
         raw_results = self.engine.generate(
             prompt=seeds,
             sampling_params=[sampling_params] * len(seeds),
             return_logprob=[True] * len(seeds),
-            logprob_start_len=[0] * len(seeds),
             top_logprobs_num=[capture_top_k] * len(seeds),
         )
 
@@ -202,6 +228,8 @@ class SGLangBackend(InferenceBackend):
                     temperature=temperature,
                     top_k=top_k,
                     top_p=top_p,
+                    min_p=min_p,
+                    repetition_penalty=repetition_penalty,
                     do_sample=do_sample,
                     generation_time_ms=per_item_ms,
                 )
@@ -285,6 +313,8 @@ class SGLangBackend(InferenceBackend):
         temperature: float,
         top_k: int | None,
         top_p: float | None,
+        min_p: float | None,
+        repetition_penalty: float | None,
         do_sample: bool,
         generation_time_ms: float,
     ) -> GenerationResult:
@@ -315,7 +345,8 @@ class SGLangBackend(InferenceBackend):
         if not generated_token_ids and output_ids:
             generated_token_ids = list(output_ids)
 
-        generated_tokens = [self.tokenizer.decode([tid]) for tid in generated_token_ids]
+        # convert_ids_to_tokens is a single vectorised call vs N decode() calls
+        generated_tokens = self.tokenizer.convert_ids_to_tokens(generated_token_ids)
 
         return GenerationResult(
             generated_text=generated_text,
@@ -328,6 +359,8 @@ class SGLangBackend(InferenceBackend):
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
             do_sample=do_sample,
             generation_time_ms=generation_time_ms,
         )
