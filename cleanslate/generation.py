@@ -1,10 +1,5 @@
-"""Generation-only experiment runner with parquet output.
-
-Runs text generation on datasets and saves all outputs + logits
-without computing metrics. Designed for HuggingFace Datasets compatibility.
-"""
-
 import logging
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +7,7 @@ from typing import Literal
 
 from tqdm import tqdm
 
-from cleanslate.backends.base import InferenceBackend
+from cleanslate.backends.base import GenerationResult, InferenceBackend
 from cleanslate.backends import create_backend
 
 logger = logging.getLogger(__name__)
@@ -51,6 +46,8 @@ class GenerationRow:
     temperature: float
     top_p: float | None
     top_k: int | None
+    min_p: float | None
+    repetition_penalty: float | None
     do_sample: bool
 
     # Metadata
@@ -98,11 +95,13 @@ class GenerationExperiment:
         model: str,
         backend: BackendType | InferenceBackend = "huggingface",
         device: str | None = None,
+        json_decoding: bool = False,
         **backend_kwargs,
     ):
         self.model_name = model
         self._device = device
         self._backend_kwargs = backend_kwargs
+        self._json_decoding = json_decoding
         self._backend: InferenceBackend | None = None
         if isinstance(backend, InferenceBackend):
             self._backend = backend
@@ -117,6 +116,7 @@ class GenerationExperiment:
                 self._backend_type,
                 self.model_name,
                 device=self._device,
+                json_decoding=self._json_decoding,
                 **self._backend_kwargs,
             )
         return self._backend
@@ -131,6 +131,8 @@ class GenerationExperiment:
         temperature: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
         do_sample: bool = True,
         capture_top_k: int = 50,
         batch_size: int = 8,
@@ -139,6 +141,9 @@ class GenerationExperiment:
     ) -> list[GenerationRow]:
         """
         Run generation on all samples and save to parquet.
+
+        Uses a double-buffer / prefetch pattern: while the GPU generates
+        batch N+1, the CPU parses batch N's results into GenerationRows.
 
         Args:
             samples: List of dicts with keys: name, seed, target (optional).
@@ -150,6 +155,8 @@ class GenerationExperiment:
             temperature: Sampling temperature
             top_k: Top-k sampling parameter
             top_p: Nucleus sampling parameter
+            min_p: Min-p sampling (keep tokens with prob >= min_p * max_prob)
+            repetition_penalty: Penalize repeated tokens (1.0 = no penalty, >1.0 = less repetition)
             do_sample: Whether to sample (vs greedy)
             capture_top_k: Number of top tokens to save per position
             batch_size: Number of sequences to generate in parallel
@@ -205,76 +212,107 @@ class GenerationExperiment:
             batch_size,
         )
 
-        for batch_idx in tqdm(range(num_batches), desc="Batches", unit="batch"):
-            batch_start = batch_idx * batch_size
-            batch_end = min(batch_start + batch_size, total_jobs)
-            batch_jobs = jobs[batch_start:batch_end]
+        # Common kwargs for every generate_batch call
+        gen_kwargs = dict(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            do_sample=do_sample,
+            capture_top_k=capture_top_k,
+        )
 
-            logger.info(
-                "[Batch %d/%d] Processing %d generations...",
-                batch_idx + 1,
-                num_batches,
-                len(batch_jobs),
-            )
+        def _get_batch_slice(idx: int) -> tuple[int, int]:
+            s = idx * batch_size
+            return s, min(s + batch_size, total_jobs)
 
-            # Extract seeds for this batch
-            batch_seeds = [job[3] for job in batch_jobs]
+        def _submit(
+            pool: ThreadPoolExecutor, idx: int
+        ) -> Future[list[GenerationResult]]:
+            s, e = _get_batch_slice(idx)
+            seeds = [jobs[j][3] for j in range(s, e)]
+            return pool.submit(backend.generate_batch, seeds=seeds, **gen_kwargs)
 
-            # Generate batch
-            results = backend.generate_batch(
-                seeds=batch_seeds,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                do_sample=do_sample,
-                capture_top_k=capture_top_k,
-            )
-
-            # Create rows for each result
+        def _parse_batch(
+            batch_jobs: list[tuple[int, int, str, str, str, dict]],
+            results: list[GenerationResult],
+        ) -> None:
             timestamp = datetime.now().isoformat()
             for job, result in zip(batch_jobs, results):
                 (
-                    sample_idx,
+                    _sample_idx,
                     gen_idx,
                     sample_name,
                     seed,
                     reference_target,
                     metadata,
                 ) = job
-
-                row = GenerationRow(
-                    model_name=self.model_name,
-                    dataset_name=dataset_name,
-                    sample_name=sample_name,
-                    generation_idx=gen_idx,
-                    seed=seed,
-                    reference_target=reference_target,
-                    generated_text=result.generated_text,
-                    generated_token_ids=result.generated_token_ids,
-                    generated_tokens=result.generated_tokens,
-                    token_log_probs=result.token_log_probs,
-                    top_k_tokens=result.top_k_tokens,
-                    top_k_probs=result.top_k_probs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    do_sample=do_sample,
-                    timestamp=timestamp,
-                    device=backend.device,
-                    generation_time_ms=result.generation_time_ms,
-                    song_id=metadata.get("song_id"),
-                    song_title=metadata.get("song_title"),
-                    song_artists=metadata.get("song_artists") or [],
-                    song_year=metadata.get("song_year"),
-                    wikipedia_link=metadata.get("wikipedia_link"),
-                    prompt_id=metadata.get("prompt_id"),
-                    prompt_template=metadata.get("prompt_template"),
-                    seed_mode=metadata.get("seed_mode"),
-                    lyrics_hint=metadata.get("lyrics_hint"),
+                rows.append(
+                    GenerationRow(
+                        model_name=self.model_name,
+                        dataset_name=dataset_name,
+                        sample_name=sample_name,
+                        generation_idx=gen_idx,
+                        seed=seed,
+                        reference_target=reference_target,
+                        generated_text=result.generated_text,
+                        generated_token_ids=result.generated_token_ids,
+                        generated_tokens=result.generated_tokens,
+                        token_log_probs=result.token_log_probs,
+                        top_k_tokens=result.top_k_tokens,
+                        top_k_probs=result.top_k_probs,
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_k=top_k,
+                        min_p=min_p,
+                        repetition_penalty=repetition_penalty,
+                        do_sample=do_sample,
+                        timestamp=timestamp,
+                        device=backend.device,
+                        generation_time_ms=result.generation_time_ms,
+                        song_id=metadata.get("song_id"),
+                        song_title=metadata.get("song_title"),
+                        song_artists=metadata.get("song_artists") or [],
+                        song_year=metadata.get("song_year"),
+                        wikipedia_link=metadata.get("wikipedia_link"),
+                        prompt_id=metadata.get("prompt_id"),
+                        prompt_template=metadata.get("prompt_template"),
+                        seed_mode=metadata.get("seed_mode"),
+                        lyrics_hint=metadata.get("lyrics_hint"),
+                    )
                 )
-                rows.append(row)
+
+        # ── Double-buffer / prefetch loop ────────────────────────────
+        # Submit batch 0 immediately, then for each batch:
+        #   1. Wait for current GPU results
+        #   2. Submit next batch to GPU (non-blocking)
+        #   3. Parse current results on CPU  ← overlaps with (2)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending: Future[list[GenerationResult]] = _submit(pool, 0)
+
+            for batch_idx in tqdm(range(num_batches), desc="Batches", unit="batch"):
+                s, e = _get_batch_slice(batch_idx)
+                batch_jobs = jobs[s:e]
+
+                logger.info(
+                    "[Batch %d/%d] Processing %d generations...",
+                    batch_idx + 1,
+                    num_batches,
+                    len(batch_jobs),
+                )
+
+                # Block until current batch finishes on GPU
+                results = pending.result()
+
+                # Immediately submit next batch so GPU stays busy
+                if batch_idx + 1 < num_batches:
+                    pending = _submit(pool, batch_idx + 1)
+
+                # Parse current results on CPU (overlaps with next GPU batch)
+                _parse_batch(batch_jobs, results)
 
         # Save parquet locally
         path = Path(output_path)
