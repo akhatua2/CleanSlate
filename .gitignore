@@ -15,4 +15,5 @@ venv/
 
 results/
 data/
-outputs/
+outputs/.cache/
+.cache/
