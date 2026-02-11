@@ -12,6 +12,8 @@ venv/
 
 # Mypy
 .mypy_cache/
+.cache/
+.claude/
 
 results/
 data/
