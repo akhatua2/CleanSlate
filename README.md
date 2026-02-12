@@ -1,191 +1,192 @@
-# Cleanslate
+# CleanSlate
 
-Sequence likelihood estimation for LLMs. Measure how likely a model is to output specific text given a seed/prompt.
+Sliding window memorization evaluation for LLMs. Detects whether a model has memorized text by computing extraction probability (p_z) across overlapping windows.
 
-Useful for:
-- **Memorization detection** - Did the model memorize training data?
-- **Perplexity analysis** - How "surprised" is the model by text?
-- **Token-level analysis** - Which tokens does the model predict correctly?
-- **Generation analysis** - Generate multiple outputs and save everything for later analysis
+Based on the methodology from:
+- Cooper et al. "Extracting memorized pieces of copyrighted books"
+- Hayes et al. "Measuring memorization in language models"
 
-## Two Modes
+## What It Does
 
-### 1. Standard Mode - Compute Metrics
-Run experiments and get immediate metrics (perplexity, rank-1 fraction, etc.)
+For any text (song lyrics, book excerpts, etc.), CleanSlate:
 
-### 2. Generation Mode - Save Everything
-Generate multiple outputs per seed and save all data (tokens, logprobs, alternatives) for later analysis.
+1. **Slides a window** across the text (e.g., 50 tokens prefix + 50 tokens suffix)
+2. **Computes p_z** for each window via teacher forcing: P(suffix | prefix)
+3. **Generates** text from the prefix and compares with BLEU/ROUGE
+4. **Aggregates** results: one row per text with summary metrics
 
 ## Install
 
 ```bash
-pip install -e .
-
-# With CLI support
-pip install -e ".[cli]"
-
-# With export support (Parquet/HF Datasets)
 pip install -e ".[cli,export]"
 ```
 
 ## Quick Start
 
-### Mode 1: Standard Mode (Compute Metrics)
-
-### Python API
-
-```python
-from cleanslate import Experiment
-from cleanslate.samples import SHAKESPEARE_SAMPLES
-
-# Run experiment on Shakespeare samples
-exp = Experiment(model="Qwen/Qwen3-0.6B", name="shakespeare_test")
-results = exp.run(SHAKESPEARE_SAMPLES)
-
-# View results
-print(results.summary())
-
-# Save to JSON
-results.save("results/shakespeare.json")
-```
-
-### CLI
+### Probe a text for memorization
 
 ```bash
-# Run experiment on a dataset
-cleanslate run -m Qwen/Qwen3-0.6B -d shakespeare -o results/out.json
-
-# Probe a single seed/target pair
-cleanslate probe "To be or not to be" ", that is the question" -m Qwen/Qwen3-0.6B
-
-# List available sample datasets
-cleanslate list-samples
-
-# Show saved results
-cleanslate show results/out.json
-
-# Compare two experiments
-cleanslate compare results/model_a.json results/model_b.json
+cleanslate probe "To be, or not to be, that is the question: Whether 'tis nobler in the mind to suffer" \
+  -m "Qwen/Qwen2.5-0.5B-Instruct" \
+  --window-size 20
 ```
 
-### Mode 2: Generation Mode (Save Everything)
-
-Generate multiple outputs per seed and save all data for later analysis.
-
-#### Python API
-
-```python
-from cleanslate.generation import GenerationExperiment
-from cleanslate.samples import SHAKESPEARE_SAMPLES
-
-# Generate 3 outputs per seed
-exp = GenerationExperiment(model="Qwen/Qwen3-0.6B")
-generations = exp.run_generation(
-    samples=SHAKESPEARE_SAMPLES,
-    num_generations=3,
-    max_tokens=100,
-    temperature=0.8,
-    output_path="generations.parquet",
-)
-
-# Load and analyze later
-import pandas as pd
-df = pd.read_parquet("generations.parquet")
-print(df[["sample_name", "generated_text", "mean_logprob"]])
+Output:
+```
+Windows: 1
+Memorized: 1
+Coverage: 93.0%
+Max p_z: 0.018083  ← 1.8% (above 0.1% threshold = memorized!)
 ```
 
-#### CLI
+### Evaluate a HuggingFace dataset
 
 ```bash
-# Generate 3 outputs per seed, save to Parquet
-cleanslate generate -m Qwen/Qwen3-0.6B -d shakespeare -n 3 -o generations.parquet
-
-# Analyze later with pandas, DuckDB, etc.
+cleanslate eval \
+  -d unlearning-cleanslate/generated_songs \
+  -c direct__first_line \
+  -m "Qwen/Qwen3-8B" \
+  --window-size 50 \
+  --stride 25 \
+  -n 100 \
+  --hf-push unlearning-cleanslate/eval_results
 ```
 
-**Saves per generation:**
-- Generated text + tokens
-- Log probabilities per token
-- Top-10 alternative tokens at each position
-- Generation parameters (temp, top-p, top-k)
-- Timing and model info
+**Note:** The `-c` option selects which HF dataset config to load from. The evaluation is done on raw text (no prompts/system messages).
 
-**Output formats:**
-- Parquet (fast, columnar, pandas/DuckDB compatible)
-- HuggingFace Datasets
-- Both
+## Output Schema
 
-## Backends
+One row per text with:
 
-| Backend | Install | Best For |
-|---------|---------|----------|
-| **HuggingFace** (default) | `pip install -e .` | Simple setup, CPU/GPU, single-sample probes |
-| **SGLang** | `pip install -e ".[sglang]"` | GPU-optimized batch generation, continuous batching |
-| **vLLM** | `pip install -e ".[vllm]"` | Basic support (not recommended) |
+| Column | Description |
+|--------|-------------|
+| `max_p_z` | Highest p_z across all windows |
+| `mean_p_z` | Average p_z |
+| `memorized_windows` | Count where p_z >= threshold |
+| `coverage` | % of characters in memorized windows |
+| `best_window_seed` | Prefix of most memorized window |
+| `best_window_target` | Suffix of most memorized window |
+| `best_window_generated` | Model's generation from that prefix |
+| `best_window_bleu_1` | BLEU-1 score (generated vs target) |
+| `windows` | Array of all window results |
 
-### SGLang Backend
+## CLI Options
 
-SGLang uses continuous batching and PagedAttention for maximum GPU utilization.
-Ideal for large-scale generation workloads.
+```bash
+cleanslate eval --help
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-d`, `--hf-dataset` | required | HuggingFace dataset ID |
+| `-c`, `--hf-config` | required | Dataset config/split to load |
+| `-m`, `--model` | Qwen/Qwen2.5-0.5B-Instruct | Model to evaluate |
+| `-w`, `--window-size` | 50 | Window size in tokens (prefix & suffix) |
+| `--stride` | 25 | Stride in tokens |
+| `-t`, `--threshold` | 0.001 | Memorization threshold (0.1%) |
+| `-n`, `--limit` | None | Limit number of texts to process |
+| `--no-generate` | False | Skip generation, only compute p_z |
+| `--hf-push` | None | Push results to HuggingFace |
+
+## Python API
 
 ```python
-from cleanslate.generation import GenerationExperiment
-from cleanslate.samples import SHAKESPEARE_SAMPLES
+from cleanslate import MemorizationConfig, MemorizationEvaluator
 
-# SGLang backend with batch generation
-exp = GenerationExperiment(model="Qwen/Qwen2.5-0.5B-Instruct", backend="sglang")
-rows = exp.run(
-    samples=SHAKESPEARE_SAMPLES,
-    dataset_name="shakespeare",
-    output_path="generations/shakespeare.parquet",
-    num_generations=5,
-    batch_size=32,
+config = MemorizationConfig(
+    window_prefix_len=50,
+    window_suffix_len=50,
+    window_stride=25,
+    tau_min=0.001,  # 0.1% threshold
+    do_generate=True,
 )
-```
 
-**Important:** Scripts using the SGLang backend must use `if __name__ == '__main__':` guard.
+evaluator = MemorizationEvaluator(
+    model="Qwen/Qwen2.5-0.5B-Instruct",
+    backend="sglang",
+    config=config,
+)
+
+# Sliding window on a text
+result = evaluator.sliding_window(
+    text="When you're weary, feeling small...",
+    name="Bridge Over Troubled Water",
+)
+
+print(f"Windows: {result.total_windows}")
+print(f"Memorized: {result.memorized_windows}")
+print(f"Max p_z: {result.max_p_z:.6f}")
+print(f"Coverage: {result.coverage:.1%}")
+```
 
 ## Metrics
 
 | Metric | Description |
 |--------|-------------|
-| **Log-Likelihood** | Sum of log P(token_i \| context) for target tokens |
-| **Perplexity** | exp(-avg_log_likelihood) - lower = more predictable |
-| **Rank-1 Fraction** | % of tokens where model's top choice matched target |
-| **Avg Rank** | Average rank of target tokens (1 = always top choice) |
+| **p_z** | Extraction probability: P(suffix \| prefix) via teacher forcing |
+| **is_memorized** | True if p_z >= threshold (default 0.1%) |
+| **coverage** | % of text characters in at least one memorized window |
+| **perplexity** | exp(-avg_log_prob) per window |
+| **BLEU-1** | Unigram overlap between generated and target |
+| **ROUGE-L** | Longest common subsequence F1 |
 
-## Example Output
+## Backends
 
-```
-Experiment: shakespeare_test
-Model: Qwen/Qwen3-0.6B
-Device: mps
-Samples: 8
+| Backend | Best For |
+|---------|----------|
+| **SGLang** (default) | GPU-optimized, batched inference |
+| **HuggingFace** | Simple setup, CPU/GPU |
 
-────────────────────────────────────────────────────────────────────────────
-Sample                         │    Log-Lik │      PPL │   Rank-1 │  AvgRank
-────────────────────────────────────────────────────────────────────────────
-Hamlet - To be or not to be    │    -210.48 │    25.49 │   40.0%  │     36.7
-Macbeth - Tomorrow and tomorro │    -119.11 │     9.08 │   55.6%  │     25.6
-...
-────────────────────────────────────────────────────────────────────────────
-MEAN                           │    -207.28 │    81.94 │   30.2%  │    250.6
-────────────────────────────────────────────────────────────────────────────
-```
-
-## Included Samples
-
-- **Shakespeare**: Hamlet, Romeo & Juliet, Macbeth, Julius Caesar, Sonnets, etc.
-- **Books**: 1984, Pride & Prejudice, Moby Dick, Declaration of Independence, etc.
-
-## Device Support
-
-Auto-detects available hardware:
-- **CUDA** (NVIDIA GPU)
-- **MPS** (Apple Silicon)
-- **CPU** (fallback)
-
-Override with `--device`:
 ```bash
-cleanslate run -m Qwen/Qwen3-0.6B -d shakespeare --device cpu
+# Use SGLang (recommended for GPU)
+cleanslate eval -d ... -b sglang
+
+# Use HuggingFace
+cleanslate eval -d ... -b huggingface
+```
+
+## How Sliding Window Works
+
+```
+Text: "When you're weary, feeling small, when tears are in your eyes..."
+
+Window 0:
+  prefix (seed):   "When you're weary, feeling small, when tears"  [50 tokens]
+  suffix (target): "are in your eyes, I'll dry them all, I'm on"   [50 tokens]
+  → compute p_z = P(suffix | prefix)
+  → generate from prefix, compare with BLEU/ROUGE
+
+Window 1 (stride 25):
+  prefix (seed):   "feeling small, when tears are in your eyes"    [50 tokens]
+  suffix (target): "I'll dry them all, I'm on your side, oh when"  [50 tokens]
+  → compute p_z, generate, compare
+
+... repeat across entire text
+```
+
+## Example: Full Pipeline
+
+```bash
+# 1. Evaluate songs dataset
+CUDA_VISIBLE_DEVICES=0 cleanslate eval \
+  -d unlearning-cleanslate/generated_songs \
+  -c direct__first_line \
+  -m "Qwen/Qwen3-8B" \
+  --window-size 50 \
+  -n 1000 \
+  -o results/songs \
+  --hf-push unlearning-cleanslate/memorization_eval
+
+# 2. Results are saved locally and pushed to HF
+# - results/songs/direct__first_line/results.parquet
+# - results/songs/direct__first_line/config.json
+
+# 3. Analyze results
+python -c "
+import pandas as pd
+df = pd.read_parquet('results/songs/direct__first_line/results.parquet')
+print(f'Songs with memorization: {(df.memorized_windows > 0).sum()}/{len(df)}')
+print(f'Max p_z: {df.max_p_z.max():.6f}')
+print(df.nlargest(10, 'max_p_z')[['song_title', 'max_p_z', 'coverage']])
+"
 ```
