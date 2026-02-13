@@ -53,12 +53,25 @@ def eval(
         False, "--shuffle/--no-shuffle", help="Shuffle before selecting"
     ),
     seed: int = typer.Option(42, "--seed", help="Random seed for shuffle"),
+    offset: int = typer.Option(
+        0, "--offset", help="Skip first N songs (for parallel splits)"
+    ),
+    part_id: str | None = typer.Option(
+        None, "--part-id", help="Part ID for parallel runs (e.g., 'part_0'). Outputs to separate dir, skips HF push."
+    ),
     # Model
     model: str = typer.Option(
         "Qwen/Qwen2.5-0.5B-Instruct", "--model", "-m", help="Model name"
     ),
     backend: str = typer.Option(
         "sglang", "--backend", "-b", help="Backend: sglang or huggingface"
+    ),
+    # SGLang memory settings
+    mem_fraction: float = typer.Option(
+        0.85, "--mem-fraction", help="GPU memory fraction for SGLang (default: 0.85)"
+    ),
+    cuda_graph_bs: int = typer.Option(
+        1, "--cuda-graph-bs", help="Max batch size for CUDA graphs (default: 1)"
     ),
     # Sliding window settings
     window_size: int = typer.Option(
@@ -125,10 +138,12 @@ def eval(
     console.print("[bold]Loading dataset...[/bold]")
     ds_stream = load_dataset(hf_dataset, hf_config, split="train", streaming=True)
 
-    # Collect songs
+    # Collect songs (with offset support for parallel splits)
     songs = []
     for i, row in enumerate(ds_stream):
-        if limit and i >= limit:
+        if i < offset:
+            continue
+        if limit and len(songs) >= limit:
             break
         songs.append(row)
 
@@ -163,10 +178,15 @@ def eval(
 
     # Create evaluator
     console.print("[bold]Loading model...[/bold]")
+    backend_kwargs: dict[str, any] = {}
+    if backend == "sglang":
+        backend_kwargs["mem_fraction_static"] = mem_fraction
+        backend_kwargs["cuda_graph_max_bs"] = cuda_graph_bs
     evaluator = MemorizationEvaluator(
         model=model,
         backend=backend,
         config=config,
+        **backend_kwargs,
     )
 
     # Process each song with sliding window
@@ -355,7 +375,11 @@ def eval(
     console.print()
     console.print("[bold]Saving results...[/bold]")
 
-    output_path = Path(output_dir) / hf_config
+    # Use part_id for parallel runs to avoid overwriting
+    if part_id:
+        output_path = Path(output_dir) / hf_config / part_id
+    else:
+        output_path = Path(output_dir) / hf_config
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Save config
@@ -382,8 +406,8 @@ def eval(
         results_ds.to_parquet(str(parquet_path))
         console.print(f"  Saved {len(all_records)} song results to {parquet_path}")
 
-        # Push to HuggingFace
-        if hf_push:
+        # Push to HuggingFace (skip if part_id is set - merge script handles push)
+        if hf_push and not part_id:
             console.print()
             console.print(f"[bold]Pushing to HuggingFace: {hf_push}[/bold]")
 
@@ -395,6 +419,10 @@ def eval(
             console.print(
                 f"[green]Pushed to https://huggingface.co/datasets/{hf_push} "
                 f"(config: {hf_config})[/green]"
+            )
+        elif hf_push and part_id:
+            console.print(
+                f"[yellow]Skipping HF push (part_id={part_id}). Run merge script to combine and push.[/yellow]"
             )
     else:
         console.print("[yellow]No results to save (no valid songs)[/yellow]")
