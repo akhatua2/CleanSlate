@@ -16,12 +16,56 @@ from cleanslate.evaluator import (
     MemorizationConfig,
     MemorizationEvaluator,
 )
+from cleanslate.decoding import create_strategy, DecodingStrategy
 
 app = typer.Typer(
     name="cleanslate",
     help="Sliding window memorization evaluation: compute p_z + generate + compare.",
 )
 console = Console()
+
+
+def _generate_hf_repo_name(
+    org: str,
+    dataset: str,
+    config: str,
+    model: str,
+    decode_strategy: str,
+    beam_width: int | None = None,
+    length_penalty: float | None = None,
+) -> str:
+    """Generate descriptive HF repo name for eval results.
+
+    Format: {org}/eval__{dataset}__{config}__{model}__{strategy}
+    Example: unlearning-cleanslate/eval__top200_songs__direct_first_line__qwen2.5-7b__beam_w5
+    """
+    import re
+
+    def sanitize(s: str) -> str:
+        """Sanitize string for HF repo name."""
+        # Take last part after / (for model names like Qwen/Qwen2.5-7B)
+        s = s.split("/")[-1]
+        # Lowercase, replace special chars with underscore
+        s = re.sub(r"[^a-z0-9_-]", "_", s.lower())
+        # Collapse multiple underscores
+        s = re.sub(r"_+", "_", s)
+        # Strip leading/trailing underscores
+        return s.strip("_")
+
+    # Sanitize components
+    dataset_clean = sanitize(dataset)
+    config_clean = sanitize(config)
+    model_clean = sanitize(model)
+
+    # Build strategy string
+    if decode_strategy == "beam" and beam_width is not None:
+        strategy_str = f"beam_w{beam_width}"
+        if length_penalty is not None and length_penalty != 1.0:
+            strategy_str += f"_lp{length_penalty}"
+    else:
+        strategy_str = decode_strategy
+
+    return f"{org}/eval__{dataset_clean}__{config_clean}__{model_clean}__{strategy_str}"
 
 
 @app.command()
@@ -34,10 +78,10 @@ def eval(
         help="HuggingFace dataset ID (e.g. unlearning-cleanslate/generated_songs)",
     ),
     hf_config: str = typer.Option(
-        ...,
+        "default",
         "--hf-config",
         "-c",
-        help="Dataset config/split (e.g. direct__first_line)",
+        help="Dataset config/split (e.g. direct__first_line). Default: 'default'",
     ),
     # Column mapping
     text_col: str = typer.Option(
@@ -94,10 +138,25 @@ def eval(
     generate_all: bool = typer.Option(
         False, "--generate-all", help="Generate for ALL windows (slower but complete). Default: only best window"
     ),
-    temperature: float = typer.Option(
-        0.0, "--temperature", help="Generation temperature (0 = greedy)"
+    # Decoding strategy
+    decode_strategy: str = typer.Option(
+        "beam", "--decode", "-D",
+        help="Decoding strategy: greedy, beam"
     ),
-    gen_top_k: int = typer.Option(40, "--gen-top-k", help="Top-k for generation"),
+    beam_width: int = typer.Option(
+        5, "--beam-width", help="Beam width for beam search (only used with --decode beam)"
+    ),
+    length_penalty: float = typer.Option(
+        1.0, "--length-penalty", help="Length penalty for beam search (1.0 = linear, 0.0 = none)"
+    ),
+    max_batch_prompts: int = typer.Option(
+        256, "--max-batch-prompts", help="Max prompts per SGLang call (reduce if OOM)"
+    ),
+    # Legacy generation params (used for sampling strategy in future)
+    temperature: float = typer.Option(
+        0.0, "--temperature", help="Generation temperature (0 = greedy). Currently unused with --decode."
+    ),
+    gen_top_k: int = typer.Option(40, "--gen-top-k", help="Top-k for generation. Currently unused with --decode."),
     capture_top_k: int = typer.Option(
         5, "--capture-top-k", help="Top-k alternatives to save per token (0 = none)"
     ),
@@ -109,6 +168,16 @@ def eval(
         None,
         "--hf-push",
         help="Push results to HuggingFace repo (e.g. unlearning-cleanslate/eval_results)",
+    ),
+    hf_push_auto: bool = typer.Option(
+        False,
+        "--hf-push-auto",
+        help="Auto-generate HF repo name: {org}/eval__{dataset}__{model}__{strategy}",
+    ),
+    hf_push_org: str = typer.Option(
+        "unlearning-cleanslate",
+        "--hf-push-org",
+        help="HuggingFace org for --hf-push-auto (default: unlearning-cleanslate)",
     ),
 ):
     """
@@ -132,6 +201,11 @@ def eval(
     console.print(f"[bold]Window:[/bold] {window_size} tokens prefix + {window_size} tokens suffix")
     console.print(f"[bold]Stride:[/bold] {stride} tokens")
     console.print(f"[bold]Generate:[/bold] {not no_generate}")
+    if not no_generate:
+        strategy_info = f"{decode_strategy}"
+        if decode_strategy == "beam":
+            strategy_info += f" (width={beam_width}, length_penalty={length_penalty}, batch={max_batch_prompts})"
+        console.print(f"[bold]Decode:[/bold] {strategy_info}")
     console.print()
 
     # Load dataset (streaming to handle large datasets)
@@ -175,6 +249,17 @@ def eval(
         window_suffix_len=window_size,
         window_stride=stride,
     )
+
+    # Create decoding strategy
+    if decode_strategy == "beam":
+        strategy = create_strategy(
+            "beam",
+            beam_width=beam_width,
+            length_penalty=length_penalty,
+            max_batch_prompts=max_batch_prompts,
+        )
+    else:
+        strategy = create_strategy("greedy")
 
     # Create evaluator
     console.print("[bold]Loading model...[/bold]")
@@ -230,59 +315,81 @@ def eval(
         gen_results_map = {}  # window_idx -> (generated_text, bleu_1, rouge_l, exact_match)
 
         if config.do_generate:
+            def compute_beam_metrics(decode_output, target):
+                """Compute metrics for ALL beams, return structured result."""
+                beams = []
+                for i, seq in enumerate(decode_output.sequences):
+                    beam_text = seq.generated_text
+                    beam_exact = evaluator._check_exact_match(beam_text, target)
+                    beam_bleu, _, _, beam_rouge = evaluator._compute_similarity(beam_text, target)
+                    beams.append({
+                        "beam_idx": i,
+                        "text": beam_text,
+                        "bleu_1": beam_bleu,
+                        "rouge_l": beam_rouge,
+                        "exact_match": beam_exact,
+                        "score": seq.score,
+                        "log_prob": seq.total_log_prob,
+                    })
+
+                # Summary metrics
+                any_exact = any(b["exact_match"] for b in beams)
+                best_bleu_idx = max(range(len(beams)), key=lambda i: beams[i]["bleu_1"] or 0) if beams else 0
+                best_rouge_idx = max(range(len(beams)), key=lambda i: beams[i]["rouge_l"] or 0) if beams else 0
+
+                return {
+                    "beams": beams,
+                    "best_beam_text": beams[0]["text"] if beams else "",
+                    "best_beam_bleu_1": beams[0]["bleu_1"] if beams else None,
+                    "best_beam_rouge_l": beams[0]["rouge_l"] if beams else None,
+                    "best_beam_exact_match": beams[0]["exact_match"] if beams else None,
+                    "any_exact_match": any_exact,
+                    "max_bleu_1": beams[best_bleu_idx]["bleu_1"] if beams else None,
+                    "max_rouge_l": beams[best_rouge_idx]["rouge_l"] if beams else None,
+                    "best_match_beam_idx": best_bleu_idx,
+                }
+
             if generate_all:
-                # Batch generate for ALL windows
-                seeds = [w.seed for w in sw_result.windows]
-                gen_results = evaluator._get_backend().generate_batch(
-                    seeds,
+                # Batch generate for ALL windows using strategy
+                window_seeds = [w.seed for w in sw_result.windows]
+                decode_outputs = evaluator._get_backend().generate_batch(
+                    window_seeds,
+                    strategy=strategy,
                     max_new_tokens=window_size,
-                    temperature=temperature,
-                    top_k=gen_top_k,
-                    do_sample=(temperature > 0),
                     capture_top_k=capture_top_k,
                 )
-                for w, gen_result in zip(sw_result.windows, gen_results):
-                    generated_text = gen_result.generated_text
-                    exact_match = evaluator._check_exact_match(generated_text, w.target)
-                    bleu_1, _, _, rouge_l = evaluator._compute_similarity(generated_text, w.target)
-                    gen_results_map[w.window_idx] = (generated_text, bleu_1, rouge_l, exact_match)
+                for w, decode_output in zip(sw_result.windows, decode_outputs):
+                    gen_results_map[w.window_idx] = compute_beam_metrics(decode_output, w.target)
             else:
-                # Generate only for best window
-                gen_result = evaluator._get_backend().generate(
+                # Generate only for best window using strategy
+                decode_output = evaluator._get_backend().generate(
                     best_window.seed,
+                    strategy=strategy,
                     max_new_tokens=window_size,
-                    temperature=temperature,
-                    top_k=gen_top_k,
-                    do_sample=(temperature > 0),
                     capture_top_k=capture_top_k,
                 )
-                generated_text = gen_result.generated_text
-                exact_match = evaluator._check_exact_match(generated_text, best_window.target)
-                bleu_1, _, _, rouge_l = evaluator._compute_similarity(generated_text, best_window.target)
-                gen_results_map[best_window_idx] = (generated_text, bleu_1, rouge_l, exact_match)
+                gen_results_map[best_window_idx] = compute_beam_metrics(decode_output, best_window.target)
 
         # Get best window generation results
-        best_generated_text = None
-        best_bleu_1 = None
-        best_rouge_l = None
-        best_exact_match = None
+        best_window_gen = None
         if best_window_idx in gen_results_map:
-            best_generated_text, best_bleu_1, best_rouge_l, best_exact_match = gen_results_map[best_window_idx]
+            best_window_gen = gen_results_map[best_window_idx]
 
         # Compute average generation metrics across all windows
+        # Use max_bleu/max_rouge (best across all beams) for aggregation
         avg_bleu_1 = None
         avg_rouge_l = None
-        avg_exact_match = None
+        avg_any_exact = None
         if gen_results_map:
-            all_bleu = [v[1] for v in gen_results_map.values() if v[1] is not None]
-            all_rouge = [v[2] for v in gen_results_map.values() if v[2] is not None]
-            all_exact = [v[3] for v in gen_results_map.values() if v[3] is not None]
+            all_bleu = [v["max_bleu_1"] for v in gen_results_map.values() if v["max_bleu_1"] is not None]
+            all_rouge = [v["max_rouge_l"] for v in gen_results_map.values() if v["max_rouge_l"] is not None]
+            all_any_exact = [v["any_exact_match"] for v in gen_results_map.values()]
             if all_bleu:
                 avg_bleu_1 = sum(all_bleu) / len(all_bleu)
             if all_rouge:
                 avg_rouge_l = sum(all_rouge) / len(all_rouge)
-            if all_exact:
-                avg_exact_match = sum(all_exact) / len(all_exact)
+            if all_any_exact:
+                avg_any_exact = sum(all_any_exact) / len(all_any_exact)
 
         # Aggregate metrics
         p_z_values = [w.p_z for w in sw_result.windows]
@@ -305,11 +412,16 @@ def eval(
             }
             # Add generation results if available
             if w.window_idx in gen_results_map:
-                gen_text, b1, rl, em = gen_results_map[w.window_idx]
-                window_data["generated"] = gen_text
-                window_data["bleu_1"] = b1
-                window_data["rouge_l"] = rl
-                window_data["exact_match"] = em
+                gen_data = gen_results_map[w.window_idx]
+                window_data["generated"] = gen_data["best_beam_text"]
+                window_data["beams"] = gen_data["beams"]  # All beams with metrics
+                window_data["best_beam_bleu_1"] = gen_data["best_beam_bleu_1"]
+                window_data["best_beam_rouge_l"] = gen_data["best_beam_rouge_l"]
+                window_data["best_beam_exact_match"] = gen_data["best_beam_exact_match"]
+                window_data["max_bleu_1"] = gen_data["max_bleu_1"]
+                window_data["max_rouge_l"] = gen_data["max_rouge_l"]
+                window_data["any_exact_match"] = gen_data["any_exact_match"]
+                window_data["best_match_beam_idx"] = gen_data["best_match_beam_idx"]
             windows_array.append(window_data)
 
         record = {
@@ -343,19 +455,27 @@ def eval(
             "best_window_start_char": best_window.window_start_char,
             "best_window_end_char": best_window.window_end_char,
             # Generation for best window
-            "best_window_generated": best_generated_text,
-            "best_window_bleu_1": best_bleu_1,
-            "best_window_rouge_l": best_rouge_l,
-            "best_window_exact_match": best_exact_match,
+            "best_window_generated": best_window_gen["best_beam_text"] if best_window_gen else None,
+            "best_window_beams": best_window_gen["beams"] if best_window_gen else None,
+            "best_window_bleu_1": best_window_gen["best_beam_bleu_1"] if best_window_gen else None,
+            "best_window_rouge_l": best_window_gen["best_beam_rouge_l"] if best_window_gen else None,
+            "best_window_exact_match": best_window_gen["best_beam_exact_match"] if best_window_gen else None,
+            "best_window_any_exact_match": best_window_gen["any_exact_match"] if best_window_gen else None,
+            "best_window_max_bleu_1": best_window_gen["max_bleu_1"] if best_window_gen else None,
+            "best_window_max_rouge_l": best_window_gen["max_rouge_l"] if best_window_gen else None,
             # Average generation metrics (across all windows when generate_all=True)
-            "avg_bleu_1": avg_bleu_1,
-            "avg_rouge_l": avg_rouge_l,
-            "avg_exact_match": avg_exact_match,
+            # These use max across beams for each window, then average across windows
+            "avg_max_bleu_1": avg_bleu_1,
+            "avg_max_rouge_l": avg_rouge_l,
+            "avg_any_exact_match": avg_any_exact,
             # Eval config
             "eval_model": model,
             "eval_threshold": threshold,
             "window_size": window_size,
             "stride": stride,
+            "decode_strategy": decode_strategy,
+            "beam_width": beam_width if decode_strategy == "beam" else None,
+            "length_penalty": length_penalty if decode_strategy == "beam" else None,
             "generate_all_windows": generate_all,
             # All windows (array)
             "windows": windows_array,
@@ -387,19 +507,22 @@ def eval(
 
         if config.do_generate:
             # Show average metrics (preferred aggregation)
-            avg_bleu_values = [r["avg_bleu_1"] for r in all_records if r["avg_bleu_1"] is not None]
-            avg_rouge_values = [r["avg_rouge_l"] for r in all_records if r["avg_rouge_l"] is not None]
-            avg_exact_values = [r["avg_exact_match"] for r in all_records if r["avg_exact_match"] is not None]
+            avg_bleu_values = [r["avg_max_bleu_1"] for r in all_records if r["avg_max_bleu_1"] is not None]
+            avg_rouge_values = [r["avg_max_rouge_l"] for r in all_records if r["avg_max_rouge_l"] is not None]
+            avg_exact_values = [r["avg_any_exact_match"] for r in all_records if r["avg_any_exact_match"] is not None]
 
             if avg_bleu_values:
-                console.print(f"  Mean BLEU-1: {sum(avg_bleu_values)/len(avg_bleu_values):.3f}")
-                console.print(f"  Mean ROUGE-L: {sum(avg_rouge_values)/len(avg_rouge_values):.3f}")
-                console.print(f"  Mean Exact Match: {sum(avg_exact_values)/len(avg_exact_values):.3f}")
+                console.print(f"  Mean max BLEU-1: {sum(avg_bleu_values)/len(avg_bleu_values):.3f}")
+                console.print(f"  Mean max ROUGE-L: {sum(avg_rouge_values)/len(avg_rouge_values):.3f}")
+                console.print(f"  Mean any exact match: {sum(avg_exact_values)/len(avg_exact_values):.3f}")
             else:
                 # Fallback to best window metrics if generate_all wasn't used
-                bleu_values = [r["best_window_bleu_1"] for r in all_records if r["best_window_bleu_1"] is not None]
+                bleu_values = [r["best_window_max_bleu_1"] for r in all_records if r["best_window_max_bleu_1"] is not None]
+                any_exact = [r["best_window_any_exact_match"] for r in all_records if r["best_window_any_exact_match"] is not None]
                 if bleu_values:
-                    console.print(f"  Mean BLEU-1 (best window only): {sum(bleu_values)/len(bleu_values):.3f}")
+                    console.print(f"  Mean max BLEU-1 (best window only): {sum(bleu_values)/len(bleu_values):.3f}")
+                if any_exact:
+                    console.print(f"  Any exact match rate (best window): {sum(any_exact)/len(any_exact):.3f}")
 
     # Save locally
     console.print()
@@ -421,6 +544,9 @@ def eval(
         "window_size": window_size,
         "stride": stride,
         "threshold": threshold,
+        "decode_strategy": decode_strategy,
+        "beam_width": beam_width if decode_strategy == "beam" else None,
+        "length_penalty": length_penalty if decode_strategy == "beam" else None,
         "generate_all_windows": generate_all,
         "num_songs": len(all_records),
         "total_windows": total_windows,
@@ -437,20 +563,34 @@ def eval(
         console.print(f"  Saved {len(all_records)} song results to {parquet_path}")
 
         # Push to HuggingFace (skip if part_id is set - merge script handles push)
-        if hf_push and not part_id:
+        # Determine HF repo name (explicit or auto-generated)
+        effective_hf_push = hf_push
+        if hf_push_auto and not hf_push:
+            effective_hf_push = _generate_hf_repo_name(
+                org=hf_push_org,
+                dataset=hf_dataset,
+                config=hf_config,
+                model=model,
+                decode_strategy=decode_strategy,
+                beam_width=beam_width if decode_strategy == "beam" else None,
+                length_penalty=length_penalty if decode_strategy == "beam" else None,
+            )
+            console.print(f"[dim]Auto-generated HF repo: {effective_hf_push}[/dim]")
+
+        if effective_hf_push and not part_id:
             console.print()
-            console.print(f"[bold]Pushing to HuggingFace: {hf_push}[/bold]")
+            console.print(f"[bold]Pushing to HuggingFace: {effective_hf_push}[/bold]")
 
             results_ds.push_to_hub(
-                hf_push,
+                effective_hf_push,
                 config_name=hf_config,
                 split="train",
             )
             console.print(
-                f"[green]Pushed to https://huggingface.co/datasets/{hf_push} "
+                f"[green]Pushed to https://huggingface.co/datasets/{effective_hf_push} "
                 f"(config: {hf_config})[/green]"
             )
-        elif hf_push and part_id:
+        elif effective_hf_push and part_id:
             console.print(
                 f"[yellow]Skipping HF push (part_id={part_id}). Run merge script to combine and push.[/yellow]"
             )
