@@ -21,6 +21,7 @@ import json
 
 from cleanslate.backends import create_backend
 from cleanslate.backends.base import InferenceBackend, ProbabilityResult, GenerationResult
+from cleanslate.decoding import create_strategy, DecodingOutput
 from cleanslate.metrics.probability import compute_extraction_probability, ExtractionResult
 from cleanslate.metrics.bleu import BLEU1, BLEU2
 from cleanslate.metrics.rouge import ROUGE1, ROUGEL
@@ -49,6 +50,14 @@ class MemorizationConfig:
     gen_do_sample: bool = False
     gen_repetition_penalty: float | None = None
     capture_top_k: int = 50  # Top-k alternatives to save per token
+
+    # Decoding strategy settings
+    decode_strategy: str = "greedy"  # "greedy" or "beam"
+    beam_width: int = 5  # Number of beams for beam search
+    length_penalty: float = 1.0  # Length penalty for beam search
+
+    # Reproduction detection
+    reproduction_threshold: float = 0.7  # ROUGE-L threshold for "reproduced"
 
     # Sliding window settings
     window_prefix_len: int = 50  # Tokens
@@ -108,6 +117,14 @@ class MemorizationResult:
     bleu_2: float | None = None
     rouge_1: float | None = None
     rouge_l: float | None = None
+
+    # === Reproduction detection (beam search) ===
+    is_reproduced: bool = False  # Any beam has ROUGE-L > threshold
+    best_beam_rouge_l: float | None = None  # Max ROUGE-L across all beams
+    best_beam_idx: int | None = None  # Which beam had best ROUGE-L
+    num_beams: int = 1  # Number of beams generated
+    all_beam_texts: list[str] = field(default_factory=list)  # All beam outputs
+    all_beam_rouge_l: list[float] = field(default_factory=list)  # ROUGE-L per beam
 
     # === Timing ===
     compute_time_ms: float = 0.0
@@ -326,29 +343,60 @@ class MemorizationEvaluator:
         exact_match = None
         bleu_1 = bleu_2 = rouge_1 = rouge_l = None
 
+        # Reproduction detection fields
+        is_reproduced = False
+        best_beam_rouge_l: float | None = None
+        best_beam_idx: int | None = None
+        num_beams = 1
+        all_beam_texts: list[str] = []
+        all_beam_rouge_l: list[float] = []
+
         if config.do_generate:
             gen_start = time.time()
-            gen_result = backend.generate(
+
+            # Create decoding strategy
+            if config.decode_strategy == "beam":
+                strategy = create_strategy(
+                    "beam",
+                    beam_width=config.beam_width,
+                    length_penalty=config.length_penalty,
+                )
+            else:
+                strategy = create_strategy("greedy")
+
+            # Generate using strategy
+            decode_output = backend.generate(
                 seed,
+                strategy=strategy,
                 max_new_tokens=config.gen_max_new_tokens,
-                temperature=config.gen_temperature,
-                top_k=config.gen_top_k,
-                top_p=config.gen_top_p,
-                min_p=config.gen_min_p,
-                repetition_penalty=config.gen_repetition_penalty,
-                do_sample=config.gen_do_sample,
                 capture_top_k=config.capture_top_k,
             )
             generate_time_ms = (time.time() - gen_start) * 1000
 
-            generated_text = gen_result.generated_text
-            generated_token_ids = gen_result.generated_token_ids
-            generated_tokens = gen_result.generated_tokens
-            gen_log_probs = gen_result.token_log_probs
-            gen_top_k_ids = gen_result.top_k_tokens
-            gen_top_k_probs = gen_result.top_k_probs
+            # Get best sequence (top beam or greedy result)
+            best_seq = decode_output.sequences[0]
+            generated_text = best_seq.generated_text
+            generated_token_ids = best_seq.generated_token_ids
+            generated_tokens = best_seq.generated_tokens
+            gen_log_probs = best_seq.token_log_probs
+            gen_top_k_ids = best_seq.top_k_tokens
+            gen_top_k_probs = best_seq.top_k_probs
+            num_beams = len(decode_output.sequences)
 
-            # Step 3: Compare
+            # Step 3: Compare all beams and find best ROUGE-L
+            for beam_idx, seq in enumerate(decode_output.sequences):
+                beam_text = seq.generated_text
+                all_beam_texts.append(beam_text)
+                _, _, _, beam_rouge_l = self._compute_similarity(beam_text, target)
+                all_beam_rouge_l.append(beam_rouge_l if beam_rouge_l is not None else 0.0)
+
+            # Find best beam by ROUGE-L
+            if all_beam_rouge_l:
+                best_beam_idx = max(range(len(all_beam_rouge_l)), key=lambda i: all_beam_rouge_l[i])
+                best_beam_rouge_l = all_beam_rouge_l[best_beam_idx]
+                is_reproduced = best_beam_rouge_l >= config.reproduction_threshold
+
+            # Metrics for top beam
             exact_match = self._check_exact_match(generated_text, target)
             bleu_1, bleu_2, rouge_1, rouge_l = self._compute_similarity(
                 generated_text, target
@@ -387,6 +435,13 @@ class MemorizationEvaluator:
             bleu_2=bleu_2,
             rouge_1=rouge_1,
             rouge_l=rouge_l,
+            # Reproduction detection
+            is_reproduced=is_reproduced,
+            best_beam_rouge_l=best_beam_rouge_l,
+            best_beam_idx=best_beam_idx,
+            num_beams=num_beams,
+            all_beam_texts=all_beam_texts,
+            all_beam_rouge_l=all_beam_rouge_l,
             # Timing
             compute_time_ms=compute_time_ms,
             generate_time_ms=generate_time_ms,
@@ -432,22 +487,28 @@ class MemorizationEvaluator:
         compute_time_per = compute_time_total / len(pairs) if pairs else 0
 
         # Batch generate (if enabled)
-        gen_results: list[GenerationResult] | None = None
+        decode_outputs: list[DecodingOutput] | None = None
         generate_time_per = 0.0
 
         if config.do_generate:
             logger.info("Generating for %d samples...", len(pairs))
             seeds = [s["seed"] for s in samples]
+
+            # Create decoding strategy
+            if config.decode_strategy == "beam":
+                strategy = create_strategy(
+                    "beam",
+                    beam_width=config.beam_width,
+                    length_penalty=config.length_penalty,
+                )
+            else:
+                strategy = create_strategy("greedy")
+
             gen_start = time.time()
-            gen_results = backend.generate_batch(
+            decode_outputs = backend.generate_batch(
                 seeds,
+                strategy=strategy,
                 max_new_tokens=config.gen_max_new_tokens,
-                temperature=config.gen_temperature,
-                top_k=config.gen_top_k,
-                top_p=config.gen_top_p,
-                min_p=config.gen_min_p,
-                repetition_penalty=config.gen_repetition_penalty,
-                do_sample=config.gen_do_sample,
                 capture_top_k=config.capture_top_k,
             )
             generate_time_total = (time.time() - gen_start) * 1000
@@ -476,14 +537,37 @@ class MemorizationEvaluator:
             exact_match = None
             bleu_1 = bleu_2 = rouge_1 = rouge_l = None
 
-            if gen_results:
-                gen_result = gen_results[i]
-                generated_text = gen_result.generated_text
-                generated_token_ids = gen_result.generated_token_ids
-                generated_tokens = gen_result.generated_tokens
-                gen_log_probs = gen_result.token_log_probs
-                gen_top_k_ids = gen_result.top_k_tokens
-                gen_top_k_probs = gen_result.top_k_probs
+            # Reproduction detection fields
+            is_reproduced = False
+            best_beam_rouge_l: float | None = None
+            best_beam_idx: int | None = None
+            num_beams = 1
+            all_beam_texts: list[str] = []
+            all_beam_rouge_l: list[float] = []
+
+            if decode_outputs:
+                decode_output = decode_outputs[i]
+                best_seq = decode_output.sequences[0]
+                generated_text = best_seq.generated_text
+                generated_token_ids = best_seq.generated_token_ids
+                generated_tokens = best_seq.generated_tokens
+                gen_log_probs = best_seq.token_log_probs
+                gen_top_k_ids = best_seq.top_k_tokens
+                gen_top_k_probs = best_seq.top_k_probs
+                num_beams = len(decode_output.sequences)
+
+                # Compare all beams and find best ROUGE-L
+                for beam_idx, seq in enumerate(decode_output.sequences):
+                    beam_text = seq.generated_text
+                    all_beam_texts.append(beam_text)
+                    _, _, _, beam_rouge_l = self._compute_similarity(beam_text, target)
+                    all_beam_rouge_l.append(beam_rouge_l if beam_rouge_l is not None else 0.0)
+
+                # Find best beam by ROUGE-L
+                if all_beam_rouge_l:
+                    best_beam_idx = max(range(len(all_beam_rouge_l)), key=lambda j: all_beam_rouge_l[j])
+                    best_beam_rouge_l = all_beam_rouge_l[best_beam_idx]
+                    is_reproduced = best_beam_rouge_l >= config.reproduction_threshold
 
                 exact_match = self._check_exact_match(generated_text, target)
                 bleu_1, bleu_2, rouge_1, rouge_l = self._compute_similarity(
@@ -524,6 +608,13 @@ class MemorizationEvaluator:
                     bleu_2=bleu_2,
                     rouge_1=rouge_1,
                     rouge_l=rouge_l,
+                    # Reproduction detection
+                    is_reproduced=is_reproduced,
+                    best_beam_rouge_l=best_beam_rouge_l,
+                    best_beam_idx=best_beam_idx,
+                    num_beams=num_beams,
+                    all_beam_texts=all_beam_texts,
+                    all_beam_rouge_l=all_beam_rouge_l,
                     # Timing
                     compute_time_ms=compute_time_per,
                     generate_time_ms=generate_time_per,
