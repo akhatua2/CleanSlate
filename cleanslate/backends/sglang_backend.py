@@ -29,12 +29,12 @@ except ImportError:
     )
 
 from cleanslate.backends.base import (
-    GenerationResult,
     InferenceBackend,
     ProbabilityResult,
     SongGenerationOutput,
 )
 from cleanslate.chat_format import format_chat as _format_chat
+from cleanslate.decoding import DecodingOutput, DecodingStrategy, GreedyDecoding
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class SGLangBackend(InferenceBackend):
         return out
 
     # ------------------------------------------------------------------
-    # Generation
+    # Generation (strategy-based)
     # ------------------------------------------------------------------
 
     def format_chat(
@@ -146,25 +146,25 @@ class SGLangBackend(InferenceBackend):
     def generate(
         self,
         seed: str,
+        strategy: DecodingStrategy | None = None,
         max_new_tokens: int = 128,
-        temperature: float = 1.0,
-        top_k: int | None = None,
-        top_p: float | None = None,
-        min_p: float | None = None,
-        repetition_penalty: float | None = None,
-        do_sample: bool = True,
         capture_top_k: int = 50,
-    ) -> GenerationResult:
-        """Generate text from a single seed with full logprob capture."""
+    ) -> DecodingOutput:
+        """Generate text from a single seed using a decoding strategy.
+
+        Args:
+            seed: Prompt string
+            strategy: Decoding strategy (default: GreedyDecoding)
+            max_new_tokens: Maximum tokens to generate
+            capture_top_k: Number of top tokens to capture per position
+
+        Returns:
+            DecodingOutput with all sequences from the strategy
+        """
         results = self.generate_batch(
             seeds=[seed],
+            strategy=strategy,
             max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            min_p=min_p,
-            repetition_penalty=repetition_penalty,
-            do_sample=do_sample,
             capture_top_k=capture_top_k,
         )
         return results[0]
@@ -172,69 +172,31 @@ class SGLangBackend(InferenceBackend):
     def generate_batch(
         self,
         seeds: list[str],
+        strategy: DecodingStrategy | None = None,
         max_new_tokens: int = 128,
-        temperature: float = 1.0,
-        top_k: int | None = None,
-        top_p: float | None = None,
-        min_p: float | None = None,
-        repetition_penalty: float | None = None,
-        do_sample: bool = True,
         capture_top_k: int = 50,
-    ) -> list[GenerationResult]:
-        """Generate text from many seeds in a single batched call.
+    ) -> list[DecodingOutput]:
+        """Generate text from many seeds using a decoding strategy.
 
-        All prompts are submitted together and SGLang's continuous batching
-        scheduler handles them concurrently for maximum GPU utilization.
+        Args:
+            seeds: List of prompt strings
+            strategy: Decoding strategy (default: GreedyDecoding)
+            max_new_tokens: Maximum tokens to generate per seed
+            capture_top_k: Number of top tokens to capture per position
+
+        Returns:
+            List of DecodingOutput, one per seed
         """
-        if not seeds:
-            return []
-        start_time = time.time()
-        sampling_params: dict[str, Any] = {
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature if do_sample else 0.0,
-        }
-        if top_k is not None:
-            sampling_params["top_k"] = top_k
-        if top_p is not None:
-            sampling_params["top_p"] = top_p
-        if min_p is not None:
-            sampling_params["min_p"] = min_p
-        else:
-            sampling_params["min_p"] = 0.0
-        if repetition_penalty is not None:
-            sampling_params["repetition_penalty"] = repetition_penalty
-        if self._json_output:
-            sampling_params["json_schema"] = self._json_output
+        if strategy is None:
+            strategy = GreedyDecoding()
 
-        # Single batched call - SGLang schedules all prompts concurrently
-        # NOTE: logprob_start_len omitted — we only need output token logprobs,
-        # not input (prefill) logprobs, so skipping saves prefill compute.
-        raw_results = self.engine.generate(
-            prompt=seeds,
-            sampling_params=[sampling_params] * len(seeds),
-            return_logprob=[True] * len(seeds),
-            top_logprobs_num=[capture_top_k] * len(seeds),
+        return strategy.decode(
+            engine=self.engine,
+            tokenizer=self.tokenizer,
+            seeds=seeds,
+            max_new_tokens=max_new_tokens,
+            capture_top_k=capture_top_k,
         )
-
-        batch_time_ms = (time.time() - start_time) * 1000
-        per_item_ms = batch_time_ms / len(seeds)
-
-        out: list[GenerationResult] = []
-        for raw in raw_results:
-            out.append(
-                self._parse_generation(
-                    raw,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
-                    min_p=min_p,
-                    repetition_penalty=repetition_penalty,
-                    do_sample=do_sample,
-                    generation_time_ms=per_item_ms,
-                )
-            )
-        return out
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -305,65 +267,6 @@ class SGLangBackend(InferenceBackend):
         )
         return self._parse_logprobs(raw, seed_len, logprob_start)
 
-    def _parse_generation(
-        self,
-        raw: dict,
-        *,
-        max_new_tokens: int,
-        temperature: float,
-        top_k: int | None,
-        top_p: float | None,
-        min_p: float | None,
-        repetition_penalty: float | None,
-        do_sample: bool,
-        generation_time_ms: float,
-    ) -> GenerationResult:
-        """Parse a single SGLang generate response into GenerationResult."""
-        meta = raw["meta_info"]
-        generated_text: str = raw.get("text", "")
-        output_ids: list[int] = raw.get("output_ids", [])
-
-        output_logprobs = meta.get("output_token_logprobs", [])
-        output_top = meta.get("output_top_logprobs", [])
-
-        token_log_probs: list[float] = []
-        generated_token_ids: list[int] = []
-        top_k_tokens_list: list[list[int]] = []
-        top_k_probs_list: list[list[float]] = []
-
-        for i, entry in enumerate(output_logprobs):
-            token_log_probs.append(float(entry[0]))
-            generated_token_ids.append(int(entry[1]))
-
-            if i < len(output_top) and output_top[i]:
-                top_k_tokens_list.append([int(t[1]) for t in output_top[i]])
-                top_k_probs_list.append([float(t[0]) for t in output_top[i]])
-            else:
-                top_k_tokens_list.append([])
-                top_k_probs_list.append([])
-
-        if not generated_token_ids and output_ids:
-            generated_token_ids = list(output_ids)
-
-        # convert_ids_to_tokens is a single vectorised call vs N decode() calls
-        generated_tokens = self.tokenizer.convert_ids_to_tokens(generated_token_ids)
-
-        return GenerationResult(
-            generated_text=generated_text,
-            generated_token_ids=generated_token_ids,
-            generated_tokens=generated_tokens,
-            token_log_probs=token_log_probs,
-            top_k_tokens=top_k_tokens_list,
-            top_k_probs=top_k_probs_list,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            min_p=min_p,
-            repetition_penalty=repetition_penalty,
-            do_sample=do_sample,
-            generation_time_ms=generation_time_ms,
-        )
 
     def shutdown(self) -> None:
         """Shut down the SGLang engine and free GPU memory."""
