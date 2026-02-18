@@ -16,56 +16,14 @@ from cleanslate.evaluator import (
     MemorizationConfig,
     MemorizationEvaluator,
 )
-from cleanslate.decoding import create_strategy, DecodingStrategy
+from cleanslate.decoding import create_strategy
+from cleanslate.cli_utils import run_parallel_eval, generate_hf_repo_name
 
 app = typer.Typer(
     name="cleanslate",
     help="Sliding window memorization evaluation: compute p_z + generate + compare.",
 )
 console = Console()
-
-
-def _generate_hf_repo_name(
-    org: str,
-    dataset: str,
-    config: str,
-    model: str,
-    decode_strategy: str,
-    beam_width: int | None = None,
-    length_penalty: float | None = None,
-) -> str:
-    """Generate descriptive HF repo name for eval results.
-
-    Format: {org}/eval__{dataset}__{config}__{model}__{strategy}
-    Example: unlearning-cleanslate/eval__top200_songs__direct_first_line__qwen2.5-7b__beam_w5
-    """
-    import re
-
-    def sanitize(s: str) -> str:
-        """Sanitize string for HF repo name."""
-        # Take last part after / (for model names like Qwen/Qwen2.5-7B)
-        s = s.split("/")[-1]
-        # Lowercase, replace special chars with underscore
-        s = re.sub(r"[^a-z0-9_-]", "_", s.lower())
-        # Collapse multiple underscores
-        s = re.sub(r"_+", "_", s)
-        # Strip leading/trailing underscores
-        return s.strip("_")
-
-    # Sanitize components
-    dataset_clean = sanitize(dataset)
-    config_clean = sanitize(config)
-    model_clean = sanitize(model)
-
-    # Build strategy string
-    if decode_strategy == "beam" and beam_width is not None:
-        strategy_str = f"beam_w{beam_width}"
-        if length_penalty is not None and length_penalty != 1.0:
-            strategy_str += f"_lp{length_penalty}"
-    else:
-        strategy_str = decode_strategy
-
-    return f"{org}/eval__{dataset_clean}__{config_clean}__{model_clean}__{strategy_str}"
 
 
 @app.command()
@@ -103,6 +61,9 @@ def eval(
     part_id: str | None = typer.Option(
         None, "--part-id", help="Part ID for parallel runs (e.g., 'part_0'). Outputs to separate dir, skips HF push."
     ),
+    indices_file: str | None = typer.Option(
+        None, "--indices-file", help="JSON file with song indices to process (for balanced parallel splits)"
+    ),
     # Model
     model: str = typer.Option(
         "Qwen/Qwen2.5-0.5B-Instruct", "--model", "-m", help="Model name"
@@ -131,12 +92,17 @@ def eval(
         "-t",
         help="Memorization threshold tau_min (0.001 = 0.1%%)",
     ),
+    reproduction_threshold: float = typer.Option(
+        0.7,
+        "--reproduction-threshold",
+        help="ROUGE-L threshold for 'reproduced' (any beam >= this). Paper doesn't specify, 0.7 is reasonable.",
+    ),
     # Generation settings
     no_generate: bool = typer.Option(
         False, "--no-generate", help="Skip generation, only compute p_z"
     ),
     generate_all: bool = typer.Option(
-        False, "--generate-all", help="Generate for ALL windows (slower but complete). Default: only best window"
+        True, "--generate-all/--generate-best-only", help="Generate for all windows (default) or only best p_z window"
     ),
     # Decoding strategy
     decode_strategy: str = typer.Option(
@@ -179,6 +145,15 @@ def eval(
         "--hf-push-org",
         help="HuggingFace org for --hf-push-auto (default: unlearning-cleanslate)",
     ),
+    # Parallelism
+    num_gpus: int = typer.Option(
+        1, "--num-gpus", "-g",
+        help="Number of GPUs for data parallelism. Splits songs across GPUs."
+    ),
+    gpu_ids: str | None = typer.Option(
+        None, "--gpu-ids",
+        help="Comma-separated GPU IDs to use (e.g. '2,3,4,5'). Default: 0 to num_gpus-1"
+    ),
 ):
     """
     Sliding window memorization evaluation on song lyrics.
@@ -195,6 +170,41 @@ def eval(
     import json
     import statistics
 
+    # Handle multi-GPU parallelism (data parallel)
+    if num_gpus > 1 and part_id is None:
+        run_parallel_eval(
+            console=console,
+            num_gpus=num_gpus,
+            gpu_ids=gpu_ids,
+            hf_dataset=hf_dataset,
+            hf_config=hf_config,
+            text_col=text_col,
+            limit=limit,
+            shuffle=shuffle,
+            seed=seed,
+            model=model,
+            backend=backend,
+            mem_fraction=mem_fraction,
+            cuda_graph_bs=cuda_graph_bs,
+            window_size=window_size,
+            stride=stride,
+            threshold=threshold,
+            no_generate=no_generate,
+            generate_all=generate_all,
+            decode_strategy=decode_strategy,
+            beam_width=beam_width,
+            length_penalty=length_penalty,
+            max_batch_prompts=max_batch_prompts,
+            temperature=temperature,
+            gen_top_k=gen_top_k,
+            capture_top_k=capture_top_k,
+            output_dir=output_dir,
+            hf_push=hf_push,
+            hf_push_auto=hf_push_auto,
+            hf_push_org=hf_push_org,
+        )
+        return
+
     console.print(f"[bold]Dataset:[/bold] {hf_dataset} / {hf_config}")
     console.print(f"[bold]Model:[/bold] {model}")
     console.print(f"[bold]Backend:[/bold] {backend}")
@@ -208,25 +218,37 @@ def eval(
         console.print(f"[bold]Decode:[/bold] {strategy_info}")
     console.print()
 
-    # Load dataset (streaming to handle large datasets)
+    # Load dataset
     console.print("[bold]Loading dataset...[/bold]")
-    ds_stream = load_dataset(hf_dataset, hf_config, split="train", streaming=True)
 
-    # Collect songs (with offset support for parallel splits)
-    songs = []
-    for i, row in enumerate(ds_stream):
-        if i < offset:
-            continue
-        if limit and len(songs) >= limit:
-            break
-        songs.append(row)
+    if indices_file:
+        # Load specific indices from assignment file (for balanced parallel splits)
+        with open(indices_file) as f:
+            assignment = json.load(f)
+        indices = assignment["indices"]
 
-    if shuffle:
-        import random
-        random.seed(seed)
-        random.shuffle(songs)
+        # Load full dataset and select specific indices
+        ds = load_dataset(hf_dataset, hf_config, split="train")
+        songs = [ds[i] for i in indices]
+        console.print(f"  Loaded {len(songs)} songs from indices file")
+    else:
+        # Original streaming approach with offset/limit
+        ds_stream = load_dataset(hf_dataset, hf_config, split="train", streaming=True)
 
-    console.print(f"  Loaded {len(songs)} songs")
+        songs = []
+        for i, row in enumerate(ds_stream):
+            if i < offset:
+                continue
+            if limit and len(songs) >= limit:
+                break
+            songs.append(row)
+
+        if shuffle:
+            import random
+            random.seed(seed)
+            random.shuffle(songs)
+
+        console.print(f"  Loaded {len(songs)} songs")
     console.print()
 
     # Validate text column
@@ -245,12 +267,19 @@ def eval(
         gen_max_new_tokens=window_size,  # Generate same length as suffix
         gen_do_sample=(temperature > 0),
         capture_top_k=capture_top_k,
+        # Decoding strategy
+        decode_strategy=decode_strategy,
+        beam_width=beam_width,
+        length_penalty=length_penalty,
+        # Reproduction detection
+        reproduction_threshold=reproduction_threshold,
+        # Sliding window
         window_prefix_len=window_size,
         window_suffix_len=window_size,
         window_stride=stride,
     )
 
-    # Create decoding strategy
+    # Create decoding strategy for direct use
     if decode_strategy == "beam":
         strategy = create_strategy(
             "beam",
@@ -275,16 +304,33 @@ def eval(
     )
 
     # Process each song with sliding window
-    console.print()
-    console.print("[bold]Running sliding window evaluation...[/bold]")
+    if not part_id:
+        console.print()
+        console.print("[bold]Running sliding window evaluation...[/bold]")
 
     all_records = []  # One row per song (aggregated)
     total_windows = 0
     total_memorized = 0
+    total_reproduced = 0
+
+    # Progress file for parallel workers
+    progress_file = None
+    if part_id:
+        progress_dir = Path(output_dir) / hf_config / ".progress"
+        progress_dir.mkdir(parents=True, exist_ok=True)
+        progress_file = progress_dir / f"{part_id}.json"
+
+    def update_progress(current: int, total: int):
+        if progress_file:
+            import json as json_mod
+            with open(progress_file, "w") as f:
+                json_mod.dump({"current": current, "total": total}, f)
 
     from tqdm import tqdm
 
-    for song in tqdm(songs, desc="Processing songs"):
+    song_iter = songs if part_id else tqdm(songs, desc="Processing songs")
+    for song_idx, song in enumerate(song_iter):
+        update_progress(song_idx, len(songs))
         text = song[text_col]
         if not text or len(text.strip()) < 10:
             continue
@@ -413,15 +459,17 @@ def eval(
             # Add generation results if available
             if w.window_idx in gen_results_map:
                 gen_data = gen_results_map[w.window_idx]
+                max_rouge = gen_data["max_rouge_l"] or 0
                 window_data["generated"] = gen_data["best_beam_text"]
                 window_data["beams"] = gen_data["beams"]  # All beams with metrics
                 window_data["best_beam_bleu_1"] = gen_data["best_beam_bleu_1"]
                 window_data["best_beam_rouge_l"] = gen_data["best_beam_rouge_l"]
                 window_data["best_beam_exact_match"] = gen_data["best_beam_exact_match"]
                 window_data["max_bleu_1"] = gen_data["max_bleu_1"]
-                window_data["max_rouge_l"] = gen_data["max_rouge_l"]
+                window_data["max_rouge_l"] = max_rouge
                 window_data["any_exact_match"] = gen_data["any_exact_match"]
                 window_data["best_match_beam_idx"] = gen_data["best_match_beam_idx"]
+                window_data["is_reproduced"] = max_rouge >= config.reproduction_threshold
             windows_array.append(window_data)
 
         record = {
@@ -437,6 +485,10 @@ def eval(
             "num_windows": sw_result.total_windows,
             "memorized_windows": sw_result.memorized_windows,
             "memorized_fraction": sw_result.memorized_windows / sw_result.total_windows,
+            "reproduced_windows": sum(1 for w in windows_array if w.get("is_reproduced", False)),
+            "reproduced_fraction": sum(1 for w in windows_array if w.get("is_reproduced", False)) / sw_result.total_windows if sw_result.total_windows > 0 else 0,
+            "avg_rouge_l": sum(w.get("max_rouge_l", 0) or 0 for w in windows_array) / len(windows_array) if windows_array else 0,
+            "max_rouge_l": max((w.get("max_rouge_l", 0) or 0 for w in windows_array), default=0),
             "coverage": sw_result.coverage,
             # p_z statistics
             "max_p_z": sw_result.max_p_z,
@@ -484,49 +536,74 @@ def eval(
 
         total_windows += sw_result.total_windows
         total_memorized += sw_result.memorized_windows
+        total_reproduced += record["reproduced_windows"]
 
-    # Display summary
-    console.print()
-    console.print("[bold]Summary:[/bold]")
-    console.print(f"  Songs processed: {len(all_records)}")
-    console.print(f"  Total windows: {total_windows}")
-    console.print(
-        f"  Memorized windows: {total_memorized}/{total_windows} "
-        f"({total_memorized/total_windows:.1%})" if total_windows > 0 else ""
-    )
+    # Final progress update
+    update_progress(len(songs), len(songs))
 
-    if all_records:
-        max_p_z_values = [r["max_p_z"] for r in all_records]
-        songs_with_memorization = sum(1 for r in all_records if r["memorized_windows"] > 0)
-        console.print(
-            f"  Songs with memorization: {songs_with_memorization}/{len(all_records)} "
-            f"({songs_with_memorization/len(all_records):.1%})"
-        )
-        console.print(f"  Mean max_p_z: {sum(max_p_z_values)/len(max_p_z_values):.6f}")
-        console.print(f"  Highest p_z: {max(max_p_z_values):.6f}")
+    # Display summary (skip for workers)
+    if not part_id:
+        console.print()
+        console.print("[bold]Summary:[/bold]")
+        console.print(f"  Songs processed: {len(all_records)}")
+        console.print(f"  Total windows: {total_windows}")
 
-        if config.do_generate:
-            # Show average metrics (preferred aggregation)
-            avg_bleu_values = [r["avg_max_bleu_1"] for r in all_records if r["avg_max_bleu_1"] is not None]
-            avg_rouge_values = [r["avg_max_rouge_l"] for r in all_records if r["avg_max_rouge_l"] is not None]
-            avg_exact_values = [r["avg_any_exact_match"] for r in all_records if r["avg_any_exact_match"] is not None]
+        console.print()
+        console.print("[bold]  Memorization[/bold] [dim](p_z > τ_min)[/dim]")
+        if total_windows > 0:
+            console.print(
+                f"    Memorized windows: {total_memorized}/{total_windows} "
+                f"({total_memorized/total_windows:.1%})"
+            )
+        if all_records:
+            songs_with_memorization = sum(1 for r in all_records if r["memorized_windows"] > 0)
+            console.print(
+                f"    Songs with memorization: {songs_with_memorization}/{len(all_records)} "
+                f"({songs_with_memorization/len(all_records):.1%})"
+            )
 
-            if avg_bleu_values:
-                console.print(f"  Mean max BLEU-1: {sum(avg_bleu_values)/len(avg_bleu_values):.3f}")
-                console.print(f"  Mean max ROUGE-L: {sum(avg_rouge_values)/len(avg_rouge_values):.3f}")
-                console.print(f"  Mean any exact match: {sum(avg_exact_values)/len(avg_exact_values):.3f}")
-            else:
-                # Fallback to best window metrics if generate_all wasn't used
-                bleu_values = [r["best_window_max_bleu_1"] for r in all_records if r["best_window_max_bleu_1"] is not None]
-                any_exact = [r["best_window_any_exact_match"] for r in all_records if r["best_window_any_exact_match"] is not None]
-                if bleu_values:
-                    console.print(f"  Mean max BLEU-1 (best window only): {sum(bleu_values)/len(bleu_values):.3f}")
-                if any_exact:
-                    console.print(f"  Any exact match rate (best window): {sum(any_exact)/len(any_exact):.3f}")
+        console.print()
+        console.print("[bold]  Reproduction[/bold] [dim](ROUGE-L > {:.0%})[/dim]".format(config.reproduction_threshold))
+        if total_windows > 0:
+            console.print(
+                f"    Reproduced windows: {total_reproduced}/{total_windows} "
+                f"({total_reproduced/total_windows:.1%})"
+            )
+        if all_records:
+            songs_with_reproduction = sum(1 for r in all_records if r["reproduced_windows"] > 0)
+            console.print(
+                f"    Songs with reproduction: {songs_with_reproduction}/{len(all_records)} "
+                f"({songs_with_reproduction/len(all_records):.1%})"
+            )
 
-    # Save locally
-    console.print()
-    console.print("[bold]Saving results...[/bold]")
+        if all_records:
+            max_p_z_values = [r["max_p_z"] for r in all_records]
+            max_rouge_values = [r["max_rouge_l"] for r in all_records]
+            console.print()
+            console.print(f"  Highest p_z: {max(max_p_z_values):.2e}")
+            console.print(f"  Highest ROUGE-L: {max(max_rouge_values):.2f}")
+
+            if config.do_generate:
+                # Show average metrics (preferred aggregation)
+                avg_bleu_values = [r["avg_max_bleu_1"] for r in all_records if r["avg_max_bleu_1"] is not None]
+                avg_rouge_values = [r["avg_max_rouge_l"] for r in all_records if r["avg_max_rouge_l"] is not None]
+                avg_exact_values = [r["avg_any_exact_match"] for r in all_records if r["avg_any_exact_match"] is not None]
+
+                if avg_bleu_values:
+                    console.print(f"  Mean max BLEU-1: {sum(avg_bleu_values)/len(avg_bleu_values):.3f}")
+                    console.print(f"  Mean max ROUGE-L: {sum(avg_rouge_values)/len(avg_rouge_values):.3f}")
+                    console.print(f"  Mean any exact match: {sum(avg_exact_values)/len(avg_exact_values):.3f}")
+                else:
+                    # Fallback to best window metrics if generate_all wasn't used
+                    bleu_values = [r["best_window_max_bleu_1"] for r in all_records if r["best_window_max_bleu_1"] is not None]
+                    any_exact = [r["best_window_any_exact_match"] for r in all_records if r["best_window_any_exact_match"] is not None]
+                    if bleu_values:
+                        console.print(f"  Mean max BLEU-1 (best window only): {sum(bleu_values)/len(bleu_values):.3f}")
+                    if any_exact:
+                        console.print(f"  Any exact match rate (best window): {sum(any_exact)/len(any_exact):.3f}")
+
+        console.print()
+        console.print("[bold]Saving results...[/bold]")
 
     # Use part_id for parallel runs to avoid overwriting
     if part_id:
@@ -566,7 +643,7 @@ def eval(
         # Determine HF repo name (explicit or auto-generated)
         effective_hf_push = hf_push
         if hf_push_auto and not hf_push:
-            effective_hf_push = _generate_hf_repo_name(
+            effective_hf_push = generate_hf_repo_name(
                 org=hf_push_org,
                 dataset=hf_dataset,
                 config=hf_config,
