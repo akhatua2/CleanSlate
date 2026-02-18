@@ -269,6 +269,21 @@ def eval(
         if best_window_idx in gen_results_map:
             best_generated_text, best_bleu_1, best_rouge_l, best_exact_match = gen_results_map[best_window_idx]
 
+        # Compute average generation metrics across all windows
+        avg_bleu_1 = None
+        avg_rouge_l = None
+        avg_exact_match = None
+        if gen_results_map:
+            all_bleu = [v[1] for v in gen_results_map.values() if v[1] is not None]
+            all_rouge = [v[2] for v in gen_results_map.values() if v[2] is not None]
+            all_exact = [v[3] for v in gen_results_map.values() if v[3] is not None]
+            if all_bleu:
+                avg_bleu_1 = sum(all_bleu) / len(all_bleu)
+            if all_rouge:
+                avg_rouge_l = sum(all_rouge) / len(all_rouge)
+            if all_exact:
+                avg_exact_match = sum(all_exact) / len(all_exact)
+
         # Aggregate metrics
         p_z_values = [w.p_z for w in sw_result.windows]
         ppl_values = [w.perplexity for w in sw_result.windows if w.perplexity > 0]
@@ -332,6 +347,10 @@ def eval(
             "best_window_bleu_1": best_bleu_1,
             "best_window_rouge_l": best_rouge_l,
             "best_window_exact_match": best_exact_match,
+            # Average generation metrics (across all windows when generate_all=True)
+            "avg_bleu_1": avg_bleu_1,
+            "avg_rouge_l": avg_rouge_l,
+            "avg_exact_match": avg_exact_match,
             # Eval config
             "eval_model": model,
             "eval_threshold": threshold,
@@ -367,9 +386,20 @@ def eval(
         console.print(f"  Highest p_z: {max(max_p_z_values):.6f}")
 
         if config.do_generate:
-            bleu_values = [r["best_window_bleu_1"] for r in all_records if r["best_window_bleu_1"] is not None]
-            if bleu_values:
-                console.print(f"  Mean BLEU-1 (best windows): {sum(bleu_values)/len(bleu_values):.3f}")
+            # Show average metrics (preferred aggregation)
+            avg_bleu_values = [r["avg_bleu_1"] for r in all_records if r["avg_bleu_1"] is not None]
+            avg_rouge_values = [r["avg_rouge_l"] for r in all_records if r["avg_rouge_l"] is not None]
+            avg_exact_values = [r["avg_exact_match"] for r in all_records if r["avg_exact_match"] is not None]
+
+            if avg_bleu_values:
+                console.print(f"  Mean BLEU-1: {sum(avg_bleu_values)/len(avg_bleu_values):.3f}")
+                console.print(f"  Mean ROUGE-L: {sum(avg_rouge_values)/len(avg_rouge_values):.3f}")
+                console.print(f"  Mean Exact Match: {sum(avg_exact_values)/len(avg_exact_values):.3f}")
+            else:
+                # Fallback to best window metrics if generate_all wasn't used
+                bleu_values = [r["best_window_bleu_1"] for r in all_records if r["best_window_bleu_1"] is not None]
+                if bleu_values:
+                    console.print(f"  Mean BLEU-1 (best window only): {sum(bleu_values)/len(bleu_values):.3f}")
 
     # Save locally
     console.print()
