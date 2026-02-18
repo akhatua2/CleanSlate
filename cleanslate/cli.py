@@ -1,7 +1,8 @@
+"""CleanSlate CLI - Sliding window memorization evaluation."""
+
 try:
     import typer
     from rich.console import Console
-    from rich.table import Table
 except ImportError:
     raise ImportError(
         "CLI dependencies not installed. Install with: pip install cleanslate[cli]"
@@ -9,571 +10,497 @@ except ImportError:
 
 from pathlib import Path
 
-from datasets import DatasetDict, load_dataset, load_from_disk
+from datasets import Dataset, load_dataset
 
-from cleanslate.experiment import Experiment
-from cleanslate.generation import GenerationExperiment
-from cleanslate.prompt_dataset import build_prompt_splits
-from cleanslate.prompts import ALL_SEED_MODES, ALL_TEMPLATES
-from cleanslate.results import ExperimentResults
-from cleanslate.samples.billboard import (
-    DATASET_ID,
-    DEFAULT_DATASET_SPLIT,
-    load_billboard_dataset,
+from cleanslate.evaluator import (
+    MemorizationConfig,
+    MemorizationEvaluator,
 )
-from cleanslate.samples.books import BOOK_SAMPLES
-from cleanslate.samples.shakespeare import SHAKESPEARE_SAMPLES
-from cleanslate.samples.songs import SONG_SAMPLES
 
 app = typer.Typer(
     name="cleanslate",
-    help="Sequence likelihood estimation for LLMs - measure memorization and token probabilities.",
+    help="Sliding window memorization evaluation: compute p_z + generate + compare.",
 )
 console = Console()
 
 
-def _parse_templates(value: str | list[str] | None) -> list[str] | None:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        raw_items = value
-    else:
-        raw_items = [value]
-    template_list: list[str] = []
-    for item in raw_items:
-        template_list.extend([t.strip() for t in item.split(",") if t.strip()])
-    for t in template_list:
-        if t not in ALL_TEMPLATES:
-            raise typer.BadParameter(
-                f"Unknown template: {t}. Available: {list(ALL_TEMPLATES.keys())}"
-            )
-    return template_list
-
-
-def _parse_seed_modes(value: str | list[str] | None) -> list[str] | None:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        raw_items = value
-    else:
-        raw_items = [value]
-    seed_mode_list: list[str] = []
-    for item in raw_items:
-        seed_mode_list.extend([s.strip() for s in item.split(",") if s.strip()])
-    for s in seed_mode_list:
-        if s not in ALL_SEED_MODES:
-            raise typer.BadParameter(
-                f"Unknown seed mode: {s}. Available: {ALL_SEED_MODES}"
-            )
-    return seed_mode_list
-
-
 @app.command()
-def run(
-    model: str = typer.Option("Qwen/Qwen3-0.6B", "--model", "-m", help="Model name"),
-    dataset: str = typer.Option(
-        "shakespeare", "--dataset", "-d", help="Dataset: shakespeare, books, or all"
+def eval(
+    # Dataset source
+    hf_dataset: str = typer.Option(
+        ...,
+        "--hf-dataset",
+        "-d",
+        help="HuggingFace dataset ID (e.g. unlearning-cleanslate/generated_songs)",
     ),
-    name: str = typer.Option("experiment", "--name", "-n", help="Experiment name"),
-    output: str | None = typer.Option(
-        None, "--output", "-o", help="Output JSON file path"
+    hf_config: str = typer.Option(
+        ...,
+        "--hf-config",
+        "-c",
+        help="Dataset config/split (e.g. direct__first_line)",
     ),
-    device: str | None = typer.Option(
-        None, "--device", help="Device: cpu, cuda, mps, or auto"
+    # Column mapping
+    text_col: str = typer.Option(
+        "reference_target",
+        "--text-col",
+        help="Column containing the text to evaluate (lyrics)",
+    ),
+    # Sampling
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Limit number of songs to process"
+    ),
+    shuffle: bool = typer.Option(
+        False, "--shuffle/--no-shuffle", help="Shuffle before selecting"
+    ),
+    seed: int = typer.Option(42, "--seed", help="Random seed for shuffle"),
+    offset: int = typer.Option(
+        0, "--offset", help="Skip first N songs (for parallel splits)"
+    ),
+    part_id: str | None = typer.Option(
+        None, "--part-id", help="Part ID for parallel runs (e.g., 'part_0'). Outputs to separate dir, skips HF push."
+    ),
+    # Model
+    model: str = typer.Option(
+        "Qwen/Qwen2.5-0.5B-Instruct", "--model", "-m", help="Model name"
+    ),
+    backend: str = typer.Option(
+        "sglang", "--backend", "-b", help="Backend: sglang or huggingface"
+    ),
+    # SGLang memory settings
+    mem_fraction: float = typer.Option(
+        0.85, "--mem-fraction", help="GPU memory fraction for SGLang (default: 0.85)"
+    ),
+    cuda_graph_bs: int = typer.Option(
+        1, "--cuda-graph-bs", help="Max batch size for CUDA graphs (default: 1)"
+    ),
+    # Sliding window settings
+    window_size: int = typer.Option(
+        50, "--window-size", "-w", help="Window size in tokens (prefix and suffix each)"
+    ),
+    stride: int = typer.Option(
+        25, "--stride", help="Stride in tokens (default: half of window_size)"
+    ),
+    # Compute settings
+    threshold: float = typer.Option(
+        0.001,
+        "--threshold",
+        "-t",
+        help="Memorization threshold tau_min (0.001 = 0.1%%)",
+    ),
+    # Generation settings
+    no_generate: bool = typer.Option(
+        False, "--no-generate", help="Skip generation, only compute p_z"
+    ),
+    generate_all: bool = typer.Option(
+        False, "--generate-all", help="Generate for ALL windows (slower but complete). Default: only best window"
+    ),
+    temperature: float = typer.Option(
+        0.0, "--temperature", help="Generation temperature (0 = greedy)"
+    ),
+    gen_top_k: int = typer.Option(40, "--gen-top-k", help="Top-k for generation"),
+    capture_top_k: int = typer.Option(
+        5, "--capture-top-k", help="Top-k alternatives to save per token (0 = none)"
+    ),
+    # Output
+    output_dir: str = typer.Option(
+        "results/eval", "--output", "-o", help="Local output directory"
+    ),
+    hf_push: str | None = typer.Option(
+        None,
+        "--hf-push",
+        help="Push results to HuggingFace repo (e.g. unlearning-cleanslate/eval_results)",
     ),
 ):
-    """Run sequence likelihood experiment on a dataset."""
+    """
+    Sliding window memorization evaluation on song lyrics.
 
-    # Select samples
-    if dataset == "shakespeare":
-        samples = SHAKESPEARE_SAMPLES
-    elif dataset == "books":
-        samples = BOOK_SAMPLES
-    elif dataset == "all":
-        samples = SHAKESPEARE_SAMPLES + BOOK_SAMPLES
-    else:
-        console.print(f"[red]Unknown dataset: {dataset}[/red]")
-        console.print("Available: shakespeare, books, all")
+    For each song:
+    1. Slide a window across the lyrics text
+    2. Each window: prefix (seed) + suffix (target)
+    3. Compute p_z via teacher forcing
+    4. Generate and compare with BLEU/ROUGE
+    5. Aggregate results: one row per song with summary metrics
+
+    Output includes max_p_z, mean_p_z, coverage, and most memorized window details.
+    """
+    import json
+    import statistics
+
+    console.print(f"[bold]Dataset:[/bold] {hf_dataset} / {hf_config}")
+    console.print(f"[bold]Model:[/bold] {model}")
+    console.print(f"[bold]Backend:[/bold] {backend}")
+    console.print(f"[bold]Window:[/bold] {window_size} tokens prefix + {window_size} tokens suffix")
+    console.print(f"[bold]Stride:[/bold] {stride} tokens")
+    console.print(f"[bold]Generate:[/bold] {not no_generate}")
+    console.print()
+
+    # Load dataset (streaming to handle large datasets)
+    console.print("[bold]Loading dataset...[/bold]")
+    ds_stream = load_dataset(hf_dataset, hf_config, split="train", streaming=True)
+
+    # Collect songs (with offset support for parallel splits)
+    songs = []
+    for i, row in enumerate(ds_stream):
+        if i < offset:
+            continue
+        if limit and len(songs) >= limit:
+            break
+        songs.append(row)
+
+    if shuffle:
+        import random
+        random.seed(seed)
+        random.shuffle(songs)
+
+    console.print(f"  Loaded {len(songs)} songs")
+    console.print()
+
+    # Validate text column
+    if songs and text_col not in songs[0]:
+        console.print(f"[red]Error: text column '{text_col}' not found[/red]")
+        console.print(f"Available columns: {list(songs[0].keys())}")
         raise typer.Exit(1)
 
-    console.print(f"[bold]Running experiment:[/bold] {name}")
-    console.print(f"[bold]Model:[/bold] {model}")
-    console.print(f"[bold]Dataset:[/bold] {dataset} ({len(samples)} samples)")
+    # Create config
+    config = MemorizationConfig(
+        compute_top_k=40,
+        tau_min=threshold,
+        do_generate=not no_generate,
+        gen_temperature=temperature,
+        gen_top_k=gen_top_k,
+        gen_max_new_tokens=window_size,  # Generate same length as suffix
+        gen_do_sample=(temperature > 0),
+        capture_top_k=capture_top_k,
+        window_prefix_len=window_size,
+        window_suffix_len=window_size,
+        window_stride=stride,
+    )
+
+    # Create evaluator
+    console.print("[bold]Loading model...[/bold]")
+    backend_kwargs: dict[str, any] = {}
+    if backend == "sglang":
+        backend_kwargs["mem_fraction_static"] = mem_fraction
+        backend_kwargs["cuda_graph_max_bs"] = cuda_graph_bs
+    evaluator = MemorizationEvaluator(
+        model=model,
+        backend=backend,
+        config=config,
+        **backend_kwargs,
+    )
+
+    # Process each song with sliding window
     console.print()
+    console.print("[bold]Running sliding window evaluation...[/bold]")
 
-    # Run experiment
-    exp = Experiment(model=model, name=name, device=device)
-    results = exp.run(samples)
+    all_records = []  # One row per song (aggregated)
+    total_windows = 0
+    total_memorized = 0
 
-    # Display results
+    from tqdm import tqdm
+
+    for song in tqdm(songs, desc="Processing songs"):
+        text = song[text_col]
+        if not text or len(text.strip()) < 10:
+            continue
+
+        # Get song metadata
+        song_id = song.get("song_id", "")
+        song_title = song.get("song_title", "")
+        song_artists = song.get("song_artists", [])
+        song_year = song.get("song_year")
+        prompt_template = song.get("prompt_template", "")
+        seed_mode = song.get("seed_mode", "")
+
+        # Run sliding window
+        sw_result = evaluator.sliding_window(
+            text=text,
+            name=song_title or song_id,
+            show_progress=False,
+        )
+
+        if not sw_result.windows:
+            continue
+
+        # Find most memorized window
+        best_window = max(sw_result.windows, key=lambda w: w.p_z)
+        best_window_idx = best_window.window_idx
+
+        # Generate for windows
+        gen_results_map = {}  # window_idx -> (generated_text, bleu_1, rouge_l, exact_match)
+
+        if config.do_generate:
+            if generate_all:
+                # Batch generate for ALL windows
+                seeds = [w.seed for w in sw_result.windows]
+                gen_results = evaluator._get_backend().generate_batch(
+                    seeds,
+                    max_new_tokens=window_size,
+                    temperature=temperature,
+                    top_k=gen_top_k,
+                    do_sample=(temperature > 0),
+                    capture_top_k=capture_top_k,
+                )
+                for w, gen_result in zip(sw_result.windows, gen_results):
+                    generated_text = gen_result.generated_text
+                    exact_match = evaluator._check_exact_match(generated_text, w.target)
+                    bleu_1, _, _, rouge_l = evaluator._compute_similarity(generated_text, w.target)
+                    gen_results_map[w.window_idx] = (generated_text, bleu_1, rouge_l, exact_match)
+            else:
+                # Generate only for best window
+                gen_result = evaluator._get_backend().generate(
+                    best_window.seed,
+                    max_new_tokens=window_size,
+                    temperature=temperature,
+                    top_k=gen_top_k,
+                    do_sample=(temperature > 0),
+                    capture_top_k=capture_top_k,
+                )
+                generated_text = gen_result.generated_text
+                exact_match = evaluator._check_exact_match(generated_text, best_window.target)
+                bleu_1, _, _, rouge_l = evaluator._compute_similarity(generated_text, best_window.target)
+                gen_results_map[best_window_idx] = (generated_text, bleu_1, rouge_l, exact_match)
+
+        # Get best window generation results
+        best_generated_text = None
+        best_bleu_1 = None
+        best_rouge_l = None
+        best_exact_match = None
+        if best_window_idx in gen_results_map:
+            best_generated_text, best_bleu_1, best_rouge_l, best_exact_match = gen_results_map[best_window_idx]
+
+        # Compute average generation metrics across all windows
+        avg_bleu_1 = None
+        avg_rouge_l = None
+        avg_exact_match = None
+        if gen_results_map:
+            all_bleu = [v[1] for v in gen_results_map.values() if v[1] is not None]
+            all_rouge = [v[2] for v in gen_results_map.values() if v[2] is not None]
+            all_exact = [v[3] for v in gen_results_map.values() if v[3] is not None]
+            if all_bleu:
+                avg_bleu_1 = sum(all_bleu) / len(all_bleu)
+            if all_rouge:
+                avg_rouge_l = sum(all_rouge) / len(all_rouge)
+            if all_exact:
+                avg_exact_match = sum(all_exact) / len(all_exact)
+
+        # Aggregate metrics
+        p_z_values = [w.p_z for w in sw_result.windows]
+        ppl_values = [w.perplexity for w in sw_result.windows if w.perplexity > 0]
+
+        # Store all windows as array (with generation if available)
+        windows_array = []
+        for w in sw_result.windows:
+            window_data = {
+                "idx": w.window_idx,
+                "start_char": w.window_start_char,
+                "end_char": w.window_end_char,
+                "seed": w.seed,
+                "target": w.target,
+                "p_z": w.p_z,
+                "log_prob": w.log_prob,
+                "perplexity": w.perplexity,
+                "is_memorized": w.is_memorized,
+                "rank_1_fraction": w.rank_1_fraction,
+            }
+            # Add generation results if available
+            if w.window_idx in gen_results_map:
+                gen_text, b1, rl, em = gen_results_map[w.window_idx]
+                window_data["generated"] = gen_text
+                window_data["bleu_1"] = b1
+                window_data["rouge_l"] = rl
+                window_data["exact_match"] = em
+            windows_array.append(window_data)
+
+        record = {
+            # Song metadata
+            "song_id": song_id,
+            "song_title": song_title,
+            "song_artists": song_artists,
+            "song_year": song_year,
+            "prompt_template": prompt_template,
+            "seed_mode": seed_mode,
+            "text_length_chars": len(text),
+            # Aggregated metrics
+            "num_windows": sw_result.total_windows,
+            "memorized_windows": sw_result.memorized_windows,
+            "memorized_fraction": sw_result.memorized_windows / sw_result.total_windows,
+            "coverage": sw_result.coverage,
+            # p_z statistics
+            "max_p_z": sw_result.max_p_z,
+            "mean_p_z": sw_result.mean_p_z,
+            "median_p_z": sw_result.median_p_z,
+            "min_p_z": min(p_z_values),
+            "std_p_z": statistics.stdev(p_z_values) if len(p_z_values) > 1 else 0.0,
+            # Perplexity statistics
+            "mean_perplexity": statistics.mean(ppl_values) if ppl_values else 0.0,
+            "min_perplexity": min(ppl_values) if ppl_values else 0.0,
+            # Most memorized window details
+            "best_window_idx": best_window.window_idx,
+            "best_window_p_z": best_window.p_z,
+            "best_window_seed": best_window.seed,
+            "best_window_target": best_window.target,
+            "best_window_start_char": best_window.window_start_char,
+            "best_window_end_char": best_window.window_end_char,
+            # Generation for best window
+            "best_window_generated": best_generated_text,
+            "best_window_bleu_1": best_bleu_1,
+            "best_window_rouge_l": best_rouge_l,
+            "best_window_exact_match": best_exact_match,
+            # Average generation metrics (across all windows when generate_all=True)
+            "avg_bleu_1": avg_bleu_1,
+            "avg_rouge_l": avg_rouge_l,
+            "avg_exact_match": avg_exact_match,
+            # Eval config
+            "eval_model": model,
+            "eval_threshold": threshold,
+            "window_size": window_size,
+            "stride": stride,
+            "generate_all_windows": generate_all,
+            # All windows (array)
+            "windows": windows_array,
+        }
+        all_records.append(record)
+
+        total_windows += sw_result.total_windows
+        total_memorized += sw_result.memorized_windows
+
+    # Display summary
     console.print()
-    console.print(results.summary())
+    console.print("[bold]Summary:[/bold]")
+    console.print(f"  Songs processed: {len(all_records)}")
+    console.print(f"  Total windows: {total_windows}")
+    console.print(
+        f"  Memorized windows: {total_memorized}/{total_windows} "
+        f"({total_memorized/total_windows:.1%})" if total_windows > 0 else ""
+    )
 
-    # Save if output specified
-    if output:
-        results.save(output)
+    if all_records:
+        max_p_z_values = [r["max_p_z"] for r in all_records]
+        songs_with_memorization = sum(1 for r in all_records if r["memorized_windows"] > 0)
+        console.print(
+            f"  Songs with memorization: {songs_with_memorization}/{len(all_records)} "
+            f"({songs_with_memorization/len(all_records):.1%})"
+        )
+        console.print(f"  Mean max_p_z: {sum(max_p_z_values)/len(max_p_z_values):.6f}")
+        console.print(f"  Highest p_z: {max(max_p_z_values):.6f}")
+
+        if config.do_generate:
+            # Show average metrics (preferred aggregation)
+            avg_bleu_values = [r["avg_bleu_1"] for r in all_records if r["avg_bleu_1"] is not None]
+            avg_rouge_values = [r["avg_rouge_l"] for r in all_records if r["avg_rouge_l"] is not None]
+            avg_exact_values = [r["avg_exact_match"] for r in all_records if r["avg_exact_match"] is not None]
+
+            if avg_bleu_values:
+                console.print(f"  Mean BLEU-1: {sum(avg_bleu_values)/len(avg_bleu_values):.3f}")
+                console.print(f"  Mean ROUGE-L: {sum(avg_rouge_values)/len(avg_rouge_values):.3f}")
+                console.print(f"  Mean Exact Match: {sum(avg_exact_values)/len(avg_exact_values):.3f}")
+            else:
+                # Fallback to best window metrics if generate_all wasn't used
+                bleu_values = [r["best_window_bleu_1"] for r in all_records if r["best_window_bleu_1"] is not None]
+                if bleu_values:
+                    console.print(f"  Mean BLEU-1 (best window only): {sum(bleu_values)/len(bleu_values):.3f}")
+
+    # Save locally
+    console.print()
+    console.print("[bold]Saving results...[/bold]")
+
+    # Use part_id for parallel runs to avoid overwriting
+    if part_id:
+        output_path = Path(output_dir) / hf_config / part_id
+    else:
+        output_path = Path(output_dir) / hf_config
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Save config
+    config_data = {
+        "source_dataset": hf_dataset,
+        "source_config": hf_config,
+        "model": model,
+        "backend": backend,
+        "window_size": window_size,
+        "stride": stride,
+        "threshold": threshold,
+        "generate_all_windows": generate_all,
+        "num_songs": len(all_records),
+        "total_windows": total_windows,
+        "memorized_windows": total_memorized,
+    }
+    with open(output_path / "config.json", "w") as f:
+        json.dump(config_data, f, indent=2)
+
+    # Save as parquet/HF Dataset
+    if all_records:
+        results_ds = Dataset.from_list(all_records)
+        parquet_path = output_path / "results.parquet"
+        results_ds.to_parquet(str(parquet_path))
+        console.print(f"  Saved {len(all_records)} song results to {parquet_path}")
+
+        # Push to HuggingFace (skip if part_id is set - merge script handles push)
+        if hf_push and not part_id:
+            console.print()
+            console.print(f"[bold]Pushing to HuggingFace: {hf_push}[/bold]")
+
+            results_ds.push_to_hub(
+                hf_push,
+                config_name=hf_config,
+                split="train",
+            )
+            console.print(
+                f"[green]Pushed to https://huggingface.co/datasets/{hf_push} "
+                f"(config: {hf_config})[/green]"
+            )
+        elif hf_push and part_id:
+            console.print(
+                f"[yellow]Skipping HF push (part_id={part_id}). Run merge script to combine and push.[/yellow]"
+            )
+    else:
+        console.print("[yellow]No results to save (no valid songs)[/yellow]")
+
+    console.print()
+    console.print("[green bold]Done![/green bold]")
 
 
 @app.command()
 def probe(
-    seed: str = typer.Argument(..., help="Seed/prompt text"),
-    target: str = typer.Argument(..., help="Target continuation text"),
-    model: str = typer.Option("Qwen/Qwen3-0.6B", "--model", "-m", help="Model name"),
-    device: str | None = typer.Option(None, "--device", help="Device: cpu, cuda, mps"),
-):
-    """Probe a single seed/target pair."""
-
-    console.print(f"[bold]Model:[/bold] {model}")
-    console.print(f"[bold]Seed:[/bold] {seed[:50]}...")
-    console.print(f"[bold]Target:[/bold] {target[:50]}...")
-    console.print()
-
-    exp = Experiment(model=model, name="probe", device=device)
-    result = exp.run_single(seed, target)
-
-    # Display result
-    table = Table(title="Probe Results")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-
-    table.add_row("Log-Likelihood", f"{result.log_likelihood:.2f}")
-    table.add_row("Perplexity", f"{result.perplexity:.2f}")
-    table.add_row("Tokens", str(result.num_tokens))
-    table.add_row("Rank-1 Fraction", f"{result.rank_1_fraction:.1%}")
-    table.add_row("Avg Rank", f"{result.avg_rank:.1f}")
-
-    console.print(table)
-
-
-@app.command()
-def compare(
-    file1: str = typer.Argument(..., help="First results JSON file"),
-    file2: str = typer.Argument(..., help="Second results JSON file"),
-):
-    """Compare two experiment results."""
-
-    results1 = ExperimentResults.load(file1)
-    results2 = ExperimentResults.load(file2)
-
-    console.print(results1.compare(results2))
-
-
-@app.command()
-def show(
-    file: str = typer.Argument(..., help="Results JSON file to display"),
-    tokens: bool = typer.Option(False, "--tokens", "-t", help="Show token counts"),
-):
-    """Display saved experiment results."""
-
-    results = ExperimentResults.load(file)
-    console.print(results.summary(show_tokens=tokens))
-
-
-@app.command()
-def list_samples():
-    """List available sample datasets."""
-
-    console.print("[bold]Shakespeare Samples:[/bold]")
-    for i, s in enumerate(SHAKESPEARE_SAMPLES, 1):
-        console.print(f"  {i}. {s['name']}")
-
-    console.print()
-    console.print("[bold]Book Samples:[/bold]")
-    for i, s in enumerate(BOOK_SAMPLES, 1):
-        console.print(f"  {i}. {s['name']}")
-
-
-@app.command()
-def generate(
+    text: str = typer.Argument(..., help="Text to scan with sliding window"),
     model: str = typer.Option(
         "Qwen/Qwen2.5-0.5B-Instruct", "--model", "-m", help="Model name"
     ),
-    dataset: str = typer.Option(
-        "all",
-        "--dataset",
-        "-d",
-        help="Dataset: shakespeare, books, songs, or all",
-    ),
-    output: str = typer.Option(
-        ...,
-        "--output",
-        "-o",
-        help="Output file path (.parquet)",
-    ),
-    backend: str = typer.Option(
-        "huggingface",
-        "--backend",
-        "-b",
-        help="Backend: huggingface or sglang",
-    ),
-    num_generations: int = typer.Option(
-        3, "--num-generations", "-n", help="Number of generations per seed"
-    ),
-    max_tokens: int = typer.Option(
-        128, "--max-tokens", help="Maximum tokens per generation"
-    ),
-    temperature: float = typer.Option(
-        1.0, "--temperature", "-t", help="Sampling temperature"
-    ),
-    top_p: float | None = typer.Option(
-        None, "--top-p", help="Nucleus sampling (top-p)"
-    ),
-    top_k: int | None = typer.Option(None, "--top-k", help="Top-k sampling"),
-    min_p: float = typer.Option(
-        0, "--min-p", help="Min-p sampling (keep tokens with prob >= min_p * max_prob)"
-    ),
-    repetition_penalty: float | None = typer.Option(
-        None,
-        "--repetition-penalty",
-        help="Penalize repeated tokens",
-    ),
-    capture_top_k: int = typer.Option(
-        50,
-        "--capture-top-k",
-        help="Top-k alternatives to capture per position (0 = logprobs only, faster)",
-    ),
-    batch_size: int = typer.Option(8, "--batch-size", help="Batch size for generation"),
-    hf_repo: str | None = typer.Option(
-        None,
-        "--hf-repo",
-        help="Push to HuggingFace Hub repo (e.g. unlearning-cleanslate/generations)",
-    ),
-    device: str | None = typer.Option(
-        None, "--device", help="Device: cpu, cuda, mps, or auto"
-    ),
-):
-    """
-    Generate multiple outputs per seed and save all data (no metrics computed).
-
-    Saves: tokens, logprobs, top-k alternatives, full generated text, etc.
-    Use --backend sglang for GPU-optimized batch generation.
-    """
-
-    # Select samples
-    if dataset == "shakespeare":
-        samples = SHAKESPEARE_SAMPLES
-    elif dataset == "books":
-        samples = BOOK_SAMPLES
-    elif dataset == "songs":
-        samples = SONG_SAMPLES
-    elif dataset == "all":
-        samples = SHAKESPEARE_SAMPLES + BOOK_SAMPLES + SONG_SAMPLES
-    else:
-        console.print(f"[red]Unknown dataset: {dataset}[/red]")
-        console.print("Available: shakespeare, books, songs, all")
-        raise typer.Exit(1)
-
-    console.print(f"[bold]Model:[/bold] {model}")
-    console.print(f"[bold]Backend:[/bold] {backend}")
-    console.print(f"[bold]Dataset:[/bold] {dataset} ({len(samples)} samples)")
-    console.print(
-        f"[bold]Generations:[/bold] {num_generations} x {len(samples)} = "
-        f"{num_generations * len(samples)} total"
-    )
-    console.print(f"[bold]Batch size:[/bold] {batch_size}")
-    console.print(f"[bold]Capture top-k:[/bold] {capture_top_k}")
-    console.print()
-
-    exp = GenerationExperiment(model=model, backend=backend, device=device)
-    rows = exp.run(
-        samples=samples,
-        dataset_name=dataset,
-        output_path=output,
-        num_generations=num_generations,
-        max_new_tokens=max_tokens,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-        min_p=min_p,
-        repetition_penalty=repetition_penalty,
-        capture_top_k=capture_top_k,
-        batch_size=batch_size,
-        hf_repo=hf_repo,
-    )
-
-    console.print()
-    console.print(f"[green]Saved {len(rows)} generations to {output}[/green]")
-    if hf_repo:
-        console.print(
-            f"[green]Pushed to https://huggingface.co/datasets/{hf_repo}[/green]"
-        )
-
-
-@app.command()
-def build_prompts(
-    dataset_id: str = typer.Option(
-        DATASET_ID, "--dataset-id", help="HuggingFace dataset ID"
-    ),
-    dataset_split: str = typer.Option(
-        DEFAULT_DATASET_SPLIT, "--dataset-split", help="Dataset split name"
-    ),
-    year_start: int | None = typer.Option(
-        None, "--year-start", help="Start year (optional)"
-    ),
-    year_end: int | None = typer.Option(None, "--year-end", help="End year (optional)"),
-    limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Maximum number of songs"
-    ),
-    shuffle: bool = typer.Option(
-        False, "--shuffle/--no-shuffle", help="Shuffle before selecting"
-    ),
-    seed: int = typer.Option(42, "--seed", help="Shuffle seed"),
-    templates: list[str] | None = typer.Option(
-        None,
-        "--templates",
-        "-t",
-        help="Comma-separated template names (default: all)",
-        callback=_parse_templates,
-    ),
-    seed_modes: list[str] | None = typer.Option(
-        None,
-        "--seed-modes",
-        "-s",
-        help="Comma-separated seed modes (default: none,first_line)",
-        callback=_parse_seed_modes,
-    ),
-    require_lyrics: bool = typer.Option(
-        True, "--require-lyrics/--no-require-lyrics", help="Drop rows without lyrics"
-    ),
-    output_repo: str | None = typer.Option(
-        None,
-        "--output-repo",
-        help="HuggingFace dataset repo to push (e.g. org/prompts)",
-    ),
-    output_dir: str | None = typer.Option(
-        None, "--output-dir", help="Local directory to save DatasetDict"
-    ),
-):
-    """Build prompt splits from the Billboard dataset."""
-    console.print(f"[bold]Loading dataset:[/bold] {dataset_id} ({dataset_split})")
-
-    if (year_start is None) ^ (year_end is None):
-        raise typer.BadParameter(
-            "Provide both --year-start and --year-end, or neither."
-        )
-    year_range = (year_start, year_end) if year_start is not None else None
-
-    ds = load_billboard_dataset(
-        dataset_id=dataset_id,
-        dataset_split=dataset_split,
-        year_range=year_range,
-        limit=limit,
-        require_lyrics=require_lyrics,
-        shuffle=shuffle,
-        seed=seed,
-    )
-
-    template_list = templates or list(ALL_TEMPLATES.keys())
-    seed_mode_list = seed_modes or ALL_SEED_MODES
-
-    console.print(
-        f"[bold]Building splits:[/bold] {len(template_list)} templates x "
-        f"{len(seed_mode_list)} seed modes"
-    )
-
-    ds_dict = build_prompt_splits(ds, template_list, seed_mode_list)
-
-    for split_name, split_ds in ds_dict.items():
-        console.print(f"  Split '{split_name}': {len(split_ds)} rows")
-
-    if output_dir:
-        ds_dict.save_to_disk(output_dir)
-        console.print(f"[green]Saved to {output_dir}[/green]")
-
-    if output_repo:
-        ds_dict.push_to_hub(output_repo)
-        console.print(
-            f"[green]Pushed to https://huggingface.co/datasets/{output_repo}[/green]"
-        )
-
-    if not output_dir and not output_repo:
-        console.print(
-            "[yellow]No output specified. Use --output-dir and/or --output-repo to save.[/yellow]"
-        )
-
-
-@app.command()
-def generate_prompts(
-    prompts_dataset_id: str = typer.Option(
-        ..., "--prompts-dataset-id", help="HuggingFace prompt dataset ID or local path"
-    ),
-    split: str = typer.Option(
-        "direct__none",
-        "--split",
-        help="Prompt split (<template>__<seed_mode>), or 'all' to run every split",
-    ),
-    seed_modes: list[str] | None = typer.Option(
-        None,
-        "--seed-modes",
-        "-s",
-        help="Comma-separated seed modes to include",
-        callback=_parse_seed_modes,
-    ),
-    limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Maximum number of rows"
-    ),
-    shuffle: bool = typer.Option(
-        False, "--shuffle/--no-shuffle", help="Shuffle before selecting"
-    ),
-    seed: int = typer.Option(42, "--seed", help="Shuffle seed"),
-    model: str = typer.Option("Qwen/Qwen3-0.6B", "--model", "-m", help="Model name"),
     backend: str = typer.Option(
         "sglang", "--backend", "-b", help="Backend: sglang or huggingface"
     ),
-    thinking: bool = typer.Option(
-        False, "--thinking/--no-thinking", help="Enable model thinking mode"
+    window_size: int = typer.Option(
+        50, "--window-size", "-w", help="Window size in tokens"
     ),
-    num_generations: int = typer.Option(
-        1, "--num-generations", help="Generations per prompt"
-    ),
-    max_tokens: int = typer.Option(
-        512, "--max-tokens", help="Maximum tokens per generation"
-    ),
-    temperature: float = typer.Option(
-        0.7, "--temperature", help="Sampling temperature"
-    ),
-    top_p: float | None = typer.Option(
-        0.80, "--top-p", help="Nucleus sampling (top-p)"
-    ),
-    top_k: int | None = typer.Option(20, "--top-k", help="Top-k sampling"),
-    min_p: float = typer.Option(
-        0,
-        "--min-p",
-        help="Min-p sampling (keep tokens with prob >= min_p * max_prob)",
-    ),
-    repetition_penalty: float | None = typer.Option(
-        None,
-        "--repetition-penalty",
-        help="Penalize repeated tokens (1.0 = no penalty, >1.0 = less repetition)",
-    ),
-    json_decoding: bool = typer.Option(
-        False,
-        "--json-decoding/--no-json-decoding",
-        help="Enable JSON schema for decoding",
-    ),
-    capture_top_k: int = typer.Option(
-        0,
-        "--capture-top-k",
-        help="Top-k alternatives to capture per position (0 = logprobs only, faster)",
-    ),
-    batch_size: int = typer.Option(128, "--batch-size", help="Batch size"),
-    output: str = typer.Option(
-        "outputs/prompts_generations",
-        "--output",
-        "-o",
-        help="Output directory. Each split is saved as <output>/<split>.parquet",
-    ),
-    output_repo: str | None = typer.Option(
-        None,
-        "--output-repo",
-        help="HuggingFace dataset repo to push outputs",
-    ),
-    output_config: str | None = typer.Option(
-        None,
-        "--output-config",
-        help="Dataset config name for HF push (default: sanitized model name)",
-    ),
+    stride: int = typer.Option(25, "--stride", help="Stride in tokens"),
 ):
-    """Generate from a prompt split dataset and optionally push outputs to HF.
-
-    Use --split all to iterate over every split in the dataset.
-    Outputs are saved as <output>/<split>.parquet.
-    """
-    # ── Load dataset ──────────────────────────────────────────────────
-    is_local = Path(prompts_dataset_id).exists()
-    if is_local:
-        ds_dict = load_from_disk(prompts_dataset_id)
-    else:
-        ds_dict = load_dataset(prompts_dataset_id)
-
-    if not isinstance(ds_dict, DatasetDict):
-        console.print(
-            "[red]Expected a DatasetDict (multiple splits). "
-            "Got a single Dataset instead.[/red]"
-        )
-        raise typer.Exit(1)
-
-    # ── Resolve which splits to run ───────────────────────────────────
-    all_split_names = list(ds_dict.keys())
-
-    if split.lower() == "all":
-        splits_to_run = all_split_names
-    else:
-        if split not in ds_dict:
-            console.print(f"[red]Split not found: {split}[/red]")
-            console.print(f"Available: {all_split_names}")
-            raise typer.Exit(1)
-        splits_to_run = [split]
-
-    if not output_config:
-        output_config = model.replace("/", "__")
-
-    console.print(f"[bold]Model:[/bold] {model}")
-    console.print(f"[bold]Backend:[/bold] {backend}")
-    console.print(
-        f"[bold]Splits:[/bold] {len(splits_to_run)} "
-        f"({', '.join(splits_to_run)})"
-    )
-    console.print()
-
-    # ── Create experiment once (model loads once) ─────────────────────
-    exp = GenerationExperiment(
-        model=model, backend=backend, json_decoding=json_decoding
+    """Quick sliding window probe on a text string."""
+    config = MemorizationConfig(
+        do_generate=False,
+        window_prefix_len=window_size,
+        window_suffix_len=window_size,
+        window_stride=stride,
     )
 
-    output_dir = Path(output)
-
-    for split_name in splits_to_run:
-        ds = ds_dict[split_name]
-
-        if seed_modes:
-            ds = ds.filter(lambda x: x.get("seed_mode") in seed_modes)
-
-        if shuffle:
-            ds = ds.shuffle(seed=seed)
-
-        if limit:
-            ds = ds.select(range(min(limit, len(ds))))
-
-        rows = list(ds)
-
-        console.print(
-            f"[bold]Split '{split_name}':[/bold] {len(rows)} prompts"
-        )
-
-        split_output = output_dir / split_name
-
-        exp.run(
-            samples=rows,
-            dataset_name=output_config,
-            output_path=str(split_output),
-            num_generations=num_generations,
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            min_p=min_p,
-            repetition_penalty=repetition_penalty,
-            capture_top_k=capture_top_k,
-            batch_size=batch_size,
-            hf_repo=output_repo,
-            thinking=thinking,
-        )
-
-        console.print(
-            f"[green]  ✓ Saved {len(rows)} generations → "
-            f"{split_output}.parquet[/green]"
-        )
+    evaluator = MemorizationEvaluator(model=model, backend=backend, config=config)
+    result = evaluator.sliding_window(text, name="probe", show_progress=True)
 
     console.print()
-    console.print(
-        f"[green bold]Done — {len(splits_to_run)} split(s) saved "
-        f"under {output_dir}/[/green bold]"
-    )
-    if output_repo:
-        console.print(
-            f"[green]Pushed to https://huggingface.co/datasets/{output_repo}[/green]"
-        )
+    console.print(f"[bold]Windows:[/bold] {result.total_windows}")
+    console.print(f"[bold]Memorized:[/bold] {result.memorized_windows}")
+    console.print(f"[bold]Coverage:[/bold] {result.coverage:.1%}")
+    console.print(f"[bold]Max p_z:[/bold] {result.max_p_z:.6f}")
+    console.print(f"[bold]Mean p_z:[/bold] {result.mean_p_z:.6f}")
+
+    if result.memorized_windows > 0:
+        console.print()
+        console.print("[bold]Memorized windows:[/bold]")
+        for w in result.windows:
+            if w.is_memorized:
+                console.print(f"  Window {w.window_idx}: p_z={w.p_z:.6f}")
+                console.print(f"    prefix: {w.seed[:60]}...")
+                console.print(f"    suffix: {w.target[:60]}...")
 
 
 def main():
