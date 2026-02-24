@@ -116,7 +116,7 @@ def eval(
         1.0, "--length-penalty", help="Length penalty for beam search (1.0 = linear, 0.0 = none)"
     ),
     max_batch_prompts: int = typer.Option(
-        256, "--max-batch-prompts", help="Max prompts per SGLang call (reduce if OOM)"
+        64, "--max-batch-prompts", help="Max prompts per SGLang engine call for compute/generate. Reduce if OOM (default: 64)"
     ),
     # Legacy generation params (used for sampling strategy in future)
     temperature: float = typer.Option(
@@ -328,218 +328,364 @@ def eval(
 
     from tqdm import tqdm
 
-    song_iter = songs if part_id else tqdm(songs, desc="Processing songs")
-    for song_idx, song in enumerate(song_iter):
-        update_progress(song_idx, len(songs))
-        text = song[text_col]
-        if not text or len(text.strip()) < 10:
-            continue
+    # Auto-batch songs for better GPU utilization (only when not generating)
+    # Use conservative batch size that works for all models including MoE
+    # 10 songs × ~15 windows = ~150 windows per batch (safe for all models)
+    SONG_BATCH_SIZE = 10
 
-        # Get song metadata
-        song_id = song.get("song_id", "")
-        song_title = song.get("song_title", "")
-        song_artists = song.get("song_artists", [])
-        song_year = song.get("song_year")
-        prompt_template = song.get("prompt_template", "")
-        seed_mode = song.get("seed_mode", "")
+    if no_generate:
+        # OPTIMIZED PATH: Batch songs together for much better GPU utilization
+        # Filter valid songs first
+        valid_songs = [(i, s) for i, s in enumerate(songs) if s.get(text_col) and len(s.get(text_col, "").strip()) >= 10]
 
-        # Run sliding window
-        sw_result = evaluator.sliding_window(
-            text=text,
-            name=song_title or song_id,
-            show_progress=False,
-        )
+        num_batches = (len(valid_songs) + SONG_BATCH_SIZE - 1) // SONG_BATCH_SIZE
+        batch_iter = range(0, len(valid_songs), SONG_BATCH_SIZE)
 
-        if not sw_result.windows:
-            continue
+        if not part_id:
+            batch_iter = tqdm(list(batch_iter), desc=f"Processing song batches ({SONG_BATCH_SIZE} songs/batch)")
 
-        # Find most memorized window
-        best_window = max(sw_result.windows, key=lambda w: w.p_z)
-        best_window_idx = best_window.window_idx
+        for batch_start in batch_iter:
+            batch_end = min(batch_start + SONG_BATCH_SIZE, len(valid_songs))
+            batch_songs = valid_songs[batch_start:batch_end]
 
-        # Generate for windows
-        gen_results_map = {}  # window_idx -> (generated_text, bleu_1, rouge_l, exact_match)
+            # Prepare batch data
+            texts = [s[text_col] for _, s in batch_songs]
+            names = [s.get("song_title") or s.get("song_id", f"song_{i}") for i, s in batch_songs]
 
-        if config.do_generate:
-            def compute_beam_metrics(decode_output, target):
-                """Compute metrics for ALL beams, return structured result."""
-                beams = []
-                for i, seq in enumerate(decode_output.sequences):
-                    beam_text = seq.generated_text
-                    beam_exact = evaluator._check_exact_match(beam_text, target)
-                    beam_bleu, _, _, beam_rouge = evaluator._compute_similarity(beam_text, target)
-                    beams.append({
-                        "beam_idx": i,
-                        "text": beam_text,
-                        "bleu_1": beam_bleu,
-                        "rouge_l": beam_rouge,
-                        "exact_match": beam_exact,
-                        "score": seq.score,
-                        "log_prob": seq.total_log_prob,
-                    })
+            # Run batched sliding window
+            sw_results = evaluator.sliding_window_batch(
+                texts=texts,
+                names=names,
+                show_progress=False,
+                max_batch_prompts=max_batch_prompts,
+            )
 
-                # Summary metrics
-                any_exact = any(b["exact_match"] for b in beams)
-                best_bleu_idx = max(range(len(beams)), key=lambda i: beams[i]["bleu_1"] or 0) if beams else 0
-                best_rouge_idx = max(range(len(beams)), key=lambda i: beams[i]["rouge_l"] or 0) if beams else 0
+            # Process results
+            for (orig_idx, song), sw_result in zip(batch_songs, sw_results):
+                update_progress(orig_idx, len(songs))
 
-                return {
-                    "beams": beams,
-                    "best_beam_text": beams[0]["text"] if beams else "",
-                    "best_beam_bleu_1": beams[0]["bleu_1"] if beams else None,
-                    "best_beam_rouge_l": beams[0]["rouge_l"] if beams else None,
-                    "best_beam_exact_match": beams[0]["exact_match"] if beams else None,
-                    "any_exact_match": any_exact,
-                    "max_bleu_1": beams[best_bleu_idx]["bleu_1"] if beams else None,
-                    "max_rouge_l": beams[best_rouge_idx]["rouge_l"] if beams else None,
-                    "best_match_beam_idx": best_bleu_idx,
+                if not sw_result.windows:
+                    continue
+
+                # Get song metadata
+                song_id = song.get("song_id", "")
+                song_title = song.get("song_title", "")
+                song_artists = song.get("song_artists", [])
+                song_year = song.get("song_year")
+                prompt_template = song.get("prompt_template", "")
+                seed_mode = song.get("seed_mode", "")
+                text = song[text_col]
+
+                # Find most memorized window
+                best_window = max(sw_result.windows, key=lambda w: w.p_z)
+                best_window_idx = best_window.window_idx
+
+                # No generation in this path
+                gen_results_map = {}
+                best_window_gen = None
+
+                # Aggregate metrics
+                p_z_values = [w.p_z for w in sw_result.windows]
+                ppl_values = [w.perplexity for w in sw_result.windows if w.perplexity > 0]
+
+                # Store all windows as array
+                windows_array = []
+                for w in sw_result.windows:
+                    window_data = {
+                        "idx": w.window_idx,
+                        "start_char": w.window_start_char,
+                        "end_char": w.window_end_char,
+                        "seed": w.seed,
+                        "target": w.target,
+                        "p_z": w.p_z,
+                        "log_prob": w.log_prob,
+                        "perplexity": w.perplexity,
+                        "is_memorized": w.is_memorized,
+                        "rank_1_fraction": w.rank_1_fraction,
+                    }
+                    windows_array.append(window_data)
+
+                record = {
+                    # Song metadata
+                    "song_id": song_id,
+                    "song_title": song_title,
+                    "song_artists": song_artists,
+                    "song_year": song_year,
+                    "prompt_template": prompt_template,
+                    "seed_mode": seed_mode,
+                    "text_length_chars": len(text),
+                    # Aggregated metrics
+                    "num_windows": sw_result.total_windows,
+                    "memorized_windows": sw_result.memorized_windows,
+                    "memorized_fraction": sw_result.memorized_windows / sw_result.total_windows,
+                    "reproduced_windows": 0,
+                    "reproduced_fraction": 0.0,
+                    "avg_rouge_l": 0.0,
+                    "max_rouge_l": 0.0,
+                    "coverage": sw_result.coverage,
+                    # p_z statistics
+                    "max_p_z": sw_result.max_p_z,
+                    "mean_p_z": sw_result.mean_p_z,
+                    "median_p_z": sw_result.median_p_z,
+                    "min_p_z": min(p_z_values),
+                    "std_p_z": statistics.stdev(p_z_values) if len(p_z_values) > 1 else 0.0,
+                    # Perplexity statistics
+                    "mean_perplexity": statistics.mean(ppl_values) if ppl_values else 0.0,
+                    "min_perplexity": min(ppl_values) if ppl_values else 0.0,
+                    # Most memorized window details
+                    "best_window_idx": best_window.window_idx,
+                    "best_window_p_z": best_window.p_z,
+                    "best_window_seed": best_window.seed,
+                    "best_window_target": best_window.target,
+                    "best_window_start_char": best_window.window_start_char,
+                    "best_window_end_char": best_window.window_end_char,
+                    # Generation for best window (empty for no_generate)
+                    "best_window_generated": None,
+                    "best_window_beams": None,
+                    "best_window_bleu_1": None,
+                    "best_window_rouge_l": None,
+                    "best_window_exact_match": None,
+                    "best_window_any_exact_match": None,
+                    "best_window_max_bleu_1": None,
+                    "best_window_max_rouge_l": None,
+                    # Average generation metrics (empty for no_generate)
+                    "avg_max_bleu_1": None,
+                    "avg_max_rouge_l": None,
+                    "avg_any_exact_match": None,
+                    # Eval config
+                    "eval_model": model,
+                    "eval_threshold": threshold,
+                    "window_size": window_size,
+                    "stride": stride,
+                    "decode_strategy": decode_strategy,
+                    "beam_width": beam_width if decode_strategy == "beam" else None,
+                    "length_penalty": length_penalty if decode_strategy == "beam" else None,
+                    "generate_all_windows": generate_all,
+                    # All windows (array)
+                    "windows": windows_array,
                 }
+                all_records.append(record)
 
-            if generate_all:
-                # Batch generate for ALL windows using strategy
-                window_seeds = [w.seed for w in sw_result.windows]
-                decode_outputs = evaluator._get_backend().generate_batch(
-                    window_seeds,
-                    strategy=strategy,
-                    max_new_tokens=window_size,
-                    capture_top_k=capture_top_k,
-                )
-                for w, decode_output in zip(sw_result.windows, decode_outputs):
-                    gen_results_map[w.window_idx] = compute_beam_metrics(decode_output, w.target)
-            else:
-                # Generate only for best window using strategy
-                decode_output = evaluator._get_backend().generate(
-                    best_window.seed,
-                    strategy=strategy,
-                    max_new_tokens=window_size,
-                    capture_top_k=capture_top_k,
-                )
-                gen_results_map[best_window_idx] = compute_beam_metrics(decode_output, best_window.target)
+                total_windows += sw_result.total_windows
+                total_memorized += sw_result.memorized_windows
 
-        # Get best window generation results
-        best_window_gen = None
-        if best_window_idx in gen_results_map:
-            best_window_gen = gen_results_map[best_window_idx]
+        # Skip the old per-song loop for no_generate path
+        update_progress(len(songs), len(songs))
 
-        # Compute average generation metrics across all windows
-        # Use max_bleu/max_rouge (best across all beams) for aggregation
-        avg_bleu_1 = None
-        avg_rouge_l = None
-        avg_any_exact = None
-        if gen_results_map:
-            all_bleu = [v["max_bleu_1"] for v in gen_results_map.values() if v["max_bleu_1"] is not None]
-            all_rouge = [v["max_rouge_l"] for v in gen_results_map.values() if v["max_rouge_l"] is not None]
-            all_any_exact = [v["any_exact_match"] for v in gen_results_map.values()]
-            if all_bleu:
-                avg_bleu_1 = sum(all_bleu) / len(all_bleu)
-            if all_rouge:
-                avg_rouge_l = sum(all_rouge) / len(all_rouge)
-            if all_any_exact:
-                avg_any_exact = sum(all_any_exact) / len(all_any_exact)
+    else:
+        # ORIGINAL PATH: Per-song processing with generation
+        song_iter = songs if part_id else tqdm(songs, desc="Processing songs")
+        for song_idx, song in enumerate(song_iter):
+            update_progress(song_idx, len(songs))
+            text = song[text_col]
+            if not text or len(text.strip()) < 10:
+                continue
 
-        # Aggregate metrics
-        p_z_values = [w.p_z for w in sw_result.windows]
-        ppl_values = [w.perplexity for w in sw_result.windows if w.perplexity > 0]
+            # Get song metadata
+            song_id = song.get("song_id", "")
+            song_title = song.get("song_title", "")
+            song_artists = song.get("song_artists", [])
+            song_year = song.get("song_year")
+            prompt_template = song.get("prompt_template", "")
+            seed_mode = song.get("seed_mode", "")
 
-        # Store all windows as array (with generation if available)
-        windows_array = []
-        for w in sw_result.windows:
-            window_data = {
-                "idx": w.window_idx,
-                "start_char": w.window_start_char,
-                "end_char": w.window_end_char,
-                "seed": w.seed,
-                "target": w.target,
-                "p_z": w.p_z,
-                "log_prob": w.log_prob,
-                "perplexity": w.perplexity,
-                "is_memorized": w.is_memorized,
-                "rank_1_fraction": w.rank_1_fraction,
+            # Run sliding window
+            sw_result = evaluator.sliding_window(
+                text=text,
+                name=song_title or song_id,
+                show_progress=False,
+            )
+
+            if not sw_result.windows:
+                continue
+
+            # Find most memorized window
+            best_window = max(sw_result.windows, key=lambda w: w.p_z)
+            best_window_idx = best_window.window_idx
+
+            # Generate for windows
+            gen_results_map = {}  # window_idx -> (generated_text, bleu_1, rouge_l, exact_match)
+
+            if config.do_generate:
+                def compute_beam_metrics(decode_output, target):
+                    """Compute metrics for ALL beams, return structured result."""
+                    beams = []
+                    for i, seq in enumerate(decode_output.sequences):
+                        beam_text = seq.generated_text
+                        beam_exact = evaluator._check_exact_match(beam_text, target)
+                        beam_bleu, _, _, beam_rouge = evaluator._compute_similarity(beam_text, target)
+                        beams.append({
+                            "beam_idx": i,
+                            "text": beam_text,
+                            "bleu_1": beam_bleu,
+                            "rouge_l": beam_rouge,
+                            "exact_match": beam_exact,
+                            "score": seq.score,
+                            "log_prob": seq.total_log_prob,
+                        })
+
+                    # Summary metrics
+                    any_exact = any(b["exact_match"] for b in beams)
+                    best_bleu_idx = max(range(len(beams)), key=lambda i: beams[i]["bleu_1"] or 0) if beams else 0
+                    best_rouge_idx = max(range(len(beams)), key=lambda i: beams[i]["rouge_l"] or 0) if beams else 0
+
+                    return {
+                        "beams": beams,
+                        "best_beam_text": beams[0]["text"] if beams else "",
+                        "best_beam_bleu_1": beams[0]["bleu_1"] if beams else None,
+                        "best_beam_rouge_l": beams[0]["rouge_l"] if beams else None,
+                        "best_beam_exact_match": beams[0]["exact_match"] if beams else None,
+                        "any_exact_match": any_exact,
+                        "max_bleu_1": beams[best_bleu_idx]["bleu_1"] if beams else None,
+                        "max_rouge_l": beams[best_rouge_idx]["rouge_l"] if beams else None,
+                        "best_match_beam_idx": best_bleu_idx,
+                    }
+
+                if generate_all:
+                    # Batch generate for ALL windows using strategy
+                    window_seeds = [w.seed for w in sw_result.windows]
+                    decode_outputs = evaluator._get_backend().generate_batch(
+                        window_seeds,
+                        strategy=strategy,
+                        max_new_tokens=window_size,
+                        capture_top_k=capture_top_k,
+                    )
+                    for w, decode_output in zip(sw_result.windows, decode_outputs):
+                        gen_results_map[w.window_idx] = compute_beam_metrics(decode_output, w.target)
+                else:
+                    # Generate only for best window using strategy
+                    decode_output = evaluator._get_backend().generate(
+                        best_window.seed,
+                        strategy=strategy,
+                        max_new_tokens=window_size,
+                        capture_top_k=capture_top_k,
+                    )
+                    gen_results_map[best_window_idx] = compute_beam_metrics(decode_output, best_window.target)
+
+            # Get best window generation results
+            best_window_gen = None
+            if best_window_idx in gen_results_map:
+                best_window_gen = gen_results_map[best_window_idx]
+
+            # Compute average generation metrics across all windows
+            # Use max_bleu/max_rouge (best across all beams) for aggregation
+            avg_bleu_1 = None
+            avg_rouge_l = None
+            avg_any_exact = None
+            if gen_results_map:
+                all_bleu = [v["max_bleu_1"] for v in gen_results_map.values() if v["max_bleu_1"] is not None]
+                all_rouge = [v["max_rouge_l"] for v in gen_results_map.values() if v["max_rouge_l"] is not None]
+                all_any_exact = [v["any_exact_match"] for v in gen_results_map.values()]
+                if all_bleu:
+                    avg_bleu_1 = sum(all_bleu) / len(all_bleu)
+                if all_rouge:
+                    avg_rouge_l = sum(all_rouge) / len(all_rouge)
+                if all_any_exact:
+                    avg_any_exact = sum(all_any_exact) / len(all_any_exact)
+
+            # Aggregate metrics
+            p_z_values = [w.p_z for w in sw_result.windows]
+            ppl_values = [w.perplexity for w in sw_result.windows if w.perplexity > 0]
+
+            # Store all windows as array (with generation if available)
+            windows_array = []
+            for w in sw_result.windows:
+                window_data = {
+                    "idx": w.window_idx,
+                    "start_char": w.window_start_char,
+                    "end_char": w.window_end_char,
+                    "seed": w.seed,
+                    "target": w.target,
+                    "p_z": w.p_z,
+                    "log_prob": w.log_prob,
+                    "perplexity": w.perplexity,
+                    "is_memorized": w.is_memorized,
+                    "rank_1_fraction": w.rank_1_fraction,
+                }
+                # Add generation results if available
+                if w.window_idx in gen_results_map:
+                    gen_data = gen_results_map[w.window_idx]
+                    max_rouge = gen_data["max_rouge_l"] or 0
+                    window_data["generated"] = gen_data["best_beam_text"]
+                    window_data["beams"] = gen_data["beams"]  # All beams with metrics
+                    window_data["best_beam_bleu_1"] = gen_data["best_beam_bleu_1"]
+                    window_data["best_beam_rouge_l"] = gen_data["best_beam_rouge_l"]
+                    window_data["best_beam_exact_match"] = gen_data["best_beam_exact_match"]
+                    window_data["max_bleu_1"] = gen_data["max_bleu_1"]
+                    window_data["max_rouge_l"] = max_rouge
+                    window_data["any_exact_match"] = gen_data["any_exact_match"]
+                    window_data["best_match_beam_idx"] = gen_data["best_match_beam_idx"]
+                    window_data["is_reproduced"] = max_rouge >= config.reproduction_threshold
+                windows_array.append(window_data)
+
+            record = {
+                # Song metadata
+                "song_id": song_id,
+                "song_title": song_title,
+                "song_artists": song_artists,
+                "song_year": song_year,
+                "prompt_template": prompt_template,
+                "seed_mode": seed_mode,
+                "text_length_chars": len(text),
+                # Aggregated metrics
+                "num_windows": sw_result.total_windows,
+                "memorized_windows": sw_result.memorized_windows,
+                "memorized_fraction": sw_result.memorized_windows / sw_result.total_windows,
+                "reproduced_windows": sum(1 for w in windows_array if w.get("is_reproduced", False)),
+                "reproduced_fraction": sum(1 for w in windows_array if w.get("is_reproduced", False)) / sw_result.total_windows if sw_result.total_windows > 0 else 0,
+                "avg_rouge_l": sum(w.get("max_rouge_l", 0) or 0 for w in windows_array) / len(windows_array) if windows_array else 0,
+                "max_rouge_l": max((w.get("max_rouge_l", 0) or 0 for w in windows_array), default=0),
+                "coverage": sw_result.coverage,
+                # p_z statistics
+                "max_p_z": sw_result.max_p_z,
+                "mean_p_z": sw_result.mean_p_z,
+                "median_p_z": sw_result.median_p_z,
+                "min_p_z": min(p_z_values),
+                "std_p_z": statistics.stdev(p_z_values) if len(p_z_values) > 1 else 0.0,
+                # Perplexity statistics
+                "mean_perplexity": statistics.mean(ppl_values) if ppl_values else 0.0,
+                "min_perplexity": min(ppl_values) if ppl_values else 0.0,
+                # Most memorized window details
+                "best_window_idx": best_window.window_idx,
+                "best_window_p_z": best_window.p_z,
+                "best_window_seed": best_window.seed,
+                "best_window_target": best_window.target,
+                "best_window_start_char": best_window.window_start_char,
+                "best_window_end_char": best_window.window_end_char,
+                # Generation for best window
+                "best_window_generated": best_window_gen["best_beam_text"] if best_window_gen else None,
+                "best_window_beams": best_window_gen["beams"] if best_window_gen else None,
+                "best_window_bleu_1": best_window_gen["best_beam_bleu_1"] if best_window_gen else None,
+                "best_window_rouge_l": best_window_gen["best_beam_rouge_l"] if best_window_gen else None,
+                "best_window_exact_match": best_window_gen["best_beam_exact_match"] if best_window_gen else None,
+                "best_window_any_exact_match": best_window_gen["any_exact_match"] if best_window_gen else None,
+                "best_window_max_bleu_1": best_window_gen["max_bleu_1"] if best_window_gen else None,
+                "best_window_max_rouge_l": best_window_gen["max_rouge_l"] if best_window_gen else None,
+                # Average generation metrics (across all windows when generate_all=True)
+                # These use max across beams for each window, then average across windows
+                "avg_max_bleu_1": avg_bleu_1,
+                "avg_max_rouge_l": avg_rouge_l,
+                "avg_any_exact_match": avg_any_exact,
+                # Eval config
+                "eval_model": model,
+                "eval_threshold": threshold,
+                "window_size": window_size,
+                "stride": stride,
+                "decode_strategy": decode_strategy,
+                "beam_width": beam_width if decode_strategy == "beam" else None,
+                "length_penalty": length_penalty if decode_strategy == "beam" else None,
+                "generate_all_windows": generate_all,
+                # All windows (array)
+                "windows": windows_array,
             }
-            # Add generation results if available
-            if w.window_idx in gen_results_map:
-                gen_data = gen_results_map[w.window_idx]
-                max_rouge = gen_data["max_rouge_l"] or 0
-                window_data["generated"] = gen_data["best_beam_text"]
-                window_data["beams"] = gen_data["beams"]  # All beams with metrics
-                window_data["best_beam_bleu_1"] = gen_data["best_beam_bleu_1"]
-                window_data["best_beam_rouge_l"] = gen_data["best_beam_rouge_l"]
-                window_data["best_beam_exact_match"] = gen_data["best_beam_exact_match"]
-                window_data["max_bleu_1"] = gen_data["max_bleu_1"]
-                window_data["max_rouge_l"] = max_rouge
-                window_data["any_exact_match"] = gen_data["any_exact_match"]
-                window_data["best_match_beam_idx"] = gen_data["best_match_beam_idx"]
-                window_data["is_reproduced"] = max_rouge >= config.reproduction_threshold
-            windows_array.append(window_data)
+            all_records.append(record)
 
-        record = {
-            # Song metadata
-            "song_id": song_id,
-            "song_title": song_title,
-            "song_artists": song_artists,
-            "song_year": song_year,
-            "prompt_template": prompt_template,
-            "seed_mode": seed_mode,
-            "text_length_chars": len(text),
-            # Aggregated metrics
-            "num_windows": sw_result.total_windows,
-            "memorized_windows": sw_result.memorized_windows,
-            "memorized_fraction": sw_result.memorized_windows / sw_result.total_windows,
-            "reproduced_windows": sum(1 for w in windows_array if w.get("is_reproduced", False)),
-            "reproduced_fraction": sum(1 for w in windows_array if w.get("is_reproduced", False)) / sw_result.total_windows if sw_result.total_windows > 0 else 0,
-            "avg_rouge_l": sum(w.get("max_rouge_l", 0) or 0 for w in windows_array) / len(windows_array) if windows_array else 0,
-            "max_rouge_l": max((w.get("max_rouge_l", 0) or 0 for w in windows_array), default=0),
-            "coverage": sw_result.coverage,
-            # p_z statistics
-            "max_p_z": sw_result.max_p_z,
-            "mean_p_z": sw_result.mean_p_z,
-            "median_p_z": sw_result.median_p_z,
-            "min_p_z": min(p_z_values),
-            "std_p_z": statistics.stdev(p_z_values) if len(p_z_values) > 1 else 0.0,
-            # Perplexity statistics
-            "mean_perplexity": statistics.mean(ppl_values) if ppl_values else 0.0,
-            "min_perplexity": min(ppl_values) if ppl_values else 0.0,
-            # Most memorized window details
-            "best_window_idx": best_window.window_idx,
-            "best_window_p_z": best_window.p_z,
-            "best_window_seed": best_window.seed,
-            "best_window_target": best_window.target,
-            "best_window_start_char": best_window.window_start_char,
-            "best_window_end_char": best_window.window_end_char,
-            # Generation for best window
-            "best_window_generated": best_window_gen["best_beam_text"] if best_window_gen else None,
-            "best_window_beams": best_window_gen["beams"] if best_window_gen else None,
-            "best_window_bleu_1": best_window_gen["best_beam_bleu_1"] if best_window_gen else None,
-            "best_window_rouge_l": best_window_gen["best_beam_rouge_l"] if best_window_gen else None,
-            "best_window_exact_match": best_window_gen["best_beam_exact_match"] if best_window_gen else None,
-            "best_window_any_exact_match": best_window_gen["any_exact_match"] if best_window_gen else None,
-            "best_window_max_bleu_1": best_window_gen["max_bleu_1"] if best_window_gen else None,
-            "best_window_max_rouge_l": best_window_gen["max_rouge_l"] if best_window_gen else None,
-            # Average generation metrics (across all windows when generate_all=True)
-            # These use max across beams for each window, then average across windows
-            "avg_max_bleu_1": avg_bleu_1,
-            "avg_max_rouge_l": avg_rouge_l,
-            "avg_any_exact_match": avg_any_exact,
-            # Eval config
-            "eval_model": model,
-            "eval_threshold": threshold,
-            "window_size": window_size,
-            "stride": stride,
-            "decode_strategy": decode_strategy,
-            "beam_width": beam_width if decode_strategy == "beam" else None,
-            "length_penalty": length_penalty if decode_strategy == "beam" else None,
-            "generate_all_windows": generate_all,
-            # All windows (array)
-            "windows": windows_array,
-        }
-        all_records.append(record)
+            total_windows += sw_result.total_windows
+            total_memorized += sw_result.memorized_windows
+            total_reproduced += record["reproduced_windows"]
 
-        total_windows += sw_result.total_windows
-        total_memorized += sw_result.memorized_windows
-        total_reproduced += record["reproduced_windows"]
-
-    # Final progress update
-    update_progress(len(songs), len(songs))
+        # Final progress update for else block
+        update_progress(len(songs), len(songs))
 
     # Display summary (skip for workers)
     if not part_id:

@@ -639,6 +639,178 @@ class MemorizationEvaluator:
 
         return results
 
+    def sliding_window_batch(
+        self,
+        texts: list[str],
+        names: list[str] | None = None,
+        show_progress: bool = True,
+        batch_size: int = 256,
+        max_batch_prompts: int = 64,
+    ) -> list[SlidingWindowResult]:
+        """
+        Batch sliding window scan over multiple texts.
+
+        This is much more efficient than calling sliding_window() in a loop
+        because it batches windows from ALL texts into single GPU calls.
+
+        Args:
+            texts: List of texts to scan
+            names: Optional names for each text (defaults to text_0, text_1, etc.)
+            show_progress: Whether to show progress bar
+            batch_size: Max windows to collect before calling compute_batch
+            max_batch_prompts: Max prompts per backend compute call (reduce if OOM)
+
+        Returns:
+            List of SlidingWindowResult, one per text
+        """
+        from tqdm import tqdm
+
+        if not texts:
+            return []
+
+        names = names or [f"text_{i}" for i in range(len(texts))]
+        backend = self._get_backend()
+        config = self.config
+        start_time = time.time()
+
+        # Step 1: Generate all windows for all texts upfront
+        all_windows: list[tuple[int, WindowInfo]] = []  # (text_idx, window)
+        text_window_counts: list[int] = []
+
+        for text_idx, text in enumerate(texts):
+            windows = self._generate_windows(text)
+            text_window_counts.append(len(windows))
+            for w in windows:
+                all_windows.append((text_idx, w))
+
+        if not all_windows:
+            # Return empty results for all texts
+            return [
+                SlidingWindowResult(
+                    text_name=names[i],
+                    model_name=self.model_name,
+                    prefix_len=config.window_prefix_len,
+                    suffix_len=config.window_suffix_len,
+                    stride=config.window_stride,
+                    tau_min=config.tau_min,
+                    windows=[],
+                    total_windows=0,
+                )
+                for i in range(len(texts))
+            ]
+
+        # Step 2: Batch compute all windows across all texts
+        pairs = [(w.prefix, w.suffix) for _, w in all_windows]
+
+        # Process in chunks if needed (for memory)
+        all_prob_results: list[ProbabilityResult] = []
+        num_batches = (len(pairs) + batch_size - 1) // batch_size
+
+        batch_iter = range(0, len(pairs), batch_size)
+        if show_progress and num_batches > 1:
+            batch_iter = tqdm(batch_iter, desc="Computing batches", total=num_batches)
+
+        for batch_start in batch_iter:
+            batch_end = min(batch_start + batch_size, len(pairs))
+            batch_pairs = pairs[batch_start:batch_end]
+            batch_results = backend.compute_batch(batch_pairs, max_batch_size=max_batch_prompts)
+            all_prob_results.extend(batch_results)
+
+        # Step 3: Map results back to per-text structures
+        results: list[SlidingWindowResult] = []
+        result_idx = 0
+
+        for text_idx, text in enumerate(texts):
+            num_windows = text_window_counts[text_idx]
+            name = names[text_idx]
+
+            if num_windows == 0:
+                results.append(
+                    SlidingWindowResult(
+                        text_name=name,
+                        model_name=self.model_name,
+                        prefix_len=config.window_prefix_len,
+                        suffix_len=config.window_suffix_len,
+                        stride=config.window_stride,
+                        tau_min=config.tau_min,
+                        windows=[],
+                        total_windows=0,
+                    )
+                )
+                continue
+
+            # Build window results for this text
+            window_results: list[MemorizationResult] = []
+            window_idx_in_text = 0
+
+            for _ in range(num_windows):
+                _, window = all_windows[result_idx]
+                prob_result = all_prob_results[result_idx]
+                result_idx += 1
+
+                extraction = compute_extraction_probability(prob_result.token_log_probs)
+
+                window_results.append(
+                    MemorizationResult(
+                        sample_id=f"{name}_window_{window_idx_in_text}",
+                        sample_name=name,
+                        generation_idx=0,
+                        window_idx=window_idx_in_text,
+                        seed=window.prefix,
+                        target=window.suffix,
+                        window_start_char=window.start_char,
+                        window_end_char=window.end_char,
+                        window_start_token=window.start_token,
+                        p_z=extraction.prob,
+                        log_prob=extraction.log_prob,
+                        perplexity=extraction.perplexity,
+                        is_memorized=(extraction.prob >= config.tau_min),
+                        prompts_to_extract=(
+                            1 / extraction.prob if extraction.prob > 0 else float("inf")
+                        ),
+                        num_target_tokens=extraction.num_tokens,
+                        target_log_probs=prob_result.token_log_probs,
+                        target_ranks=prob_result.token_ranks or [],
+                        rank_1_fraction=prob_result.rank_1_fraction,
+                        avg_rank=prob_result.avg_rank,
+                        row_timestamp=datetime.now().isoformat(),
+                    )
+                )
+                window_idx_in_text += 1
+
+            # Compute aggregates for this text
+            p_z_values = [w.p_z for w in window_results]
+            memorized_windows = sum(1 for w in window_results if w.is_memorized)
+            coverage = self._compute_coverage(window_results, len(text))
+            char_to_max_pz = self._compute_heatmap(window_results, len(text))
+
+            results.append(
+                SlidingWindowResult(
+                    text_name=name,
+                    model_name=self.model_name,
+                    prefix_len=config.window_prefix_len,
+                    suffix_len=config.window_suffix_len,
+                    stride=config.window_stride,
+                    tau_min=config.tau_min,
+                    windows=window_results,
+                    total_windows=len(window_results),
+                    memorized_windows=memorized_windows,
+                    coverage=coverage,
+                    max_p_z=max(p_z_values) if p_z_values else 0.0,
+                    mean_p_z=sum(p_z_values) / len(p_z_values) if p_z_values else 0.0,
+                    median_p_z=sorted(p_z_values)[len(p_z_values) // 2] if p_z_values else 0.0,
+                    char_to_max_pz=char_to_max_pz,
+                    total_time_ms=0,  # Will be set at end
+                )
+            )
+
+        total_time_ms = (time.time() - start_time) * 1000
+        # Update timing on all results
+        for r in results:
+            r.total_time_ms = total_time_ms / len(results) if results else 0
+
+        return results
+
     def sliding_window(
         self,
         text: str,
