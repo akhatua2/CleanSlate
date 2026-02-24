@@ -292,11 +292,19 @@ class MemorizationEvaluator:
     def _get_backend(self) -> InferenceBackend:
         """Lazy-load the backend."""
         if self._backend is None:
+            backend_kwargs = dict(self._backend_kwargs)
+            if (
+                self._backend_type == "sglang"
+                and self.config.decode_strategy == "beam"
+                and self.config.beam_width > 0
+            ):
+                backend_kwargs.setdefault("beam_width", self.config.beam_width)
+
             self._backend = create_backend(
                 self._backend_type,
                 self.model_name,
                 device=self._device,
-                **self._backend_kwargs,
+                **backend_kwargs,
             )
         return self._backend
 

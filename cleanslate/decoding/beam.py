@@ -102,6 +102,18 @@ class BeamSearchDecoding(DecodingStrategy):
         if not seeds:
             return []
 
+        # Fast path: use SGLang's native beam-search implementation when
+        # available and configured on the engine.
+        native_outputs = self._decode_with_native_beam(
+            engine=engine,
+            tokenizer=tokenizer,
+            seeds=seeds,
+            max_new_tokens=max_new_tokens,
+            capture_top_k=capture_top_k,
+        )
+        if native_outputs is not None:
+            return native_outputs
+
         start_time = time.time()
         eos_token_id = tokenizer.eos_token_id
 
@@ -229,6 +241,110 @@ class BeamSearchDecoding(DecodingStrategy):
             outputs.append(output)
 
         return outputs
+
+    def _decode_with_native_beam(
+        self,
+        engine: Any,
+        tokenizer: Any,
+        seeds: list[str],
+        max_new_tokens: int,
+        capture_top_k: int,
+    ) -> list[DecodingOutput] | None:
+        """Decode with SGLang's native beam search if the engine supports it.
+
+        Returns None when native beam search is unavailable or misconfigured,
+        so callers can transparently fall back to the manual implementation.
+        """
+        configured_beam_width = self._engine_beam_width(engine)
+        if configured_beam_width <= 0:
+            return None
+        if configured_beam_width < self.beam_width:
+            return None
+
+        start_time = time.time()
+        top_k_request = max(self.beam_width * 2, capture_top_k)
+
+        raw_results = engine.generate(
+            prompt=seeds,
+            sampling_params=[{"max_new_tokens": max_new_tokens, "temperature": 0.0}]
+            * len(seeds),
+            return_logprob=[True] * len(seeds),
+            top_logprobs_num=[top_k_request] * len(seeds),
+        )
+        if not isinstance(raw_results, list) or len(raw_results) != len(seeds):
+            return None
+
+        # If runtime does not provide native beam outputs, use fallback path.
+        if any(
+            not raw.get("meta_info", {}).get("beam_search_outputs")
+            for raw in raw_results
+        ):
+            return None
+
+        total_time_ms = (time.time() - start_time) * 1000
+        per_seed_time = total_time_ms / len(seeds)
+
+        outputs: list[DecodingOutput] = []
+        for seed, raw in zip(seeds, raw_results):
+            seed_ids = tokenizer.encode(seed, add_special_tokens=True)
+            prompt_len = len(seed_ids)
+            beam_output = raw["meta_info"]["beam_search_outputs"]
+
+            sequences: list[GenerationSequence] = []
+            for beam in beam_output.sequences[: self.beam_width]:
+                beam_token_ids = [int(t) for t in getattr(beam, "tokens", [])]
+                generated_ids = beam_token_ids[prompt_len:]
+                generated_text = getattr(beam, "text", None) or tokenizer.decode(
+                    generated_ids, skip_special_tokens=True
+                )
+                generated_tokens = tokenizer.convert_ids_to_tokens(generated_ids)
+                total_log_prob = float(getattr(beam, "cum_logprob", 0.0))
+
+                gen_len = len(generated_ids)
+                if gen_len <= 0:
+                    score = total_log_prob
+                else:
+                    score = total_log_prob / (gen_len**self.length_penalty)
+
+                sequences.append(
+                    GenerationSequence(
+                        generated_text=generated_text,
+                        generated_token_ids=generated_ids,
+                        generated_tokens=generated_tokens,
+                        token_log_probs=[],
+                        top_k_tokens=[],
+                        top_k_probs=[],
+                        total_log_prob=total_log_prob,
+                        score=score,
+                        generation_time_ms=per_seed_time / max(self.beam_width, 1),
+                    )
+                )
+
+            if not sequences:
+                return None
+
+            outputs.append(
+                DecodingOutput(
+                    sequences=sequences,
+                    strategy_name=self.name,
+                    strategy_params=self.to_dict() | {"native_beam_search": True},
+                )
+            )
+
+        return outputs
+
+    def _engine_beam_width(self, engine: Any) -> int:
+        """Best-effort extraction of configured beam width from SGLang engine."""
+        # Current SGLang versions expose this under engine.server_args.beam_width.
+        server_args = getattr(engine, "server_args", None)
+        if server_args is not None:
+            width = getattr(server_args, "beam_width", 0)
+            try:
+                return int(width)
+            except (TypeError, ValueError):
+                return 0
+
+        return 0
 
     def _state_to_output(
         self,
