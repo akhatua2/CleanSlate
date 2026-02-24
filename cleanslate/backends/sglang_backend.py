@@ -89,12 +89,18 @@ class SGLangBackend(InferenceBackend):
     def compute_batch(
         self,
         pairs: list[tuple[str, str]],
+        max_batch_size: int = 64,
         **decoding_options: Any,
     ) -> list[ProbabilityResult]:
         """Compute probabilities for many (seed, target) pairs in one batch.
 
         SGLang's continuous batching scheduler runs all prompts concurrently,
         giving much higher GPU utilization than sequential calls.
+
+        Args:
+            pairs: List of (seed, target) tuples
+            max_batch_size: Maximum prompts per engine.generate() call.
+                            Reduce if OOM during logits computation.
         """
         if not pairs:
             return []
@@ -110,17 +116,25 @@ class SGLangBackend(InferenceBackend):
         # logprob_start_len one position early so the None falls on last seed token
         logprob_starts = [max(0, sl - 1) for sl in seed_lens]
 
-        results_raw = self.engine.generate(
-            prompt=prompts,
-            sampling_params=[{"max_new_tokens": 0, "temperature": 0}] * len(prompts),
-            return_logprob=[True] * len(prompts),
-            logprob_start_len=logprob_starts,
-            top_logprobs_num=[1] * len(prompts),
-        )
-
+        # Process in chunks to avoid OOM on large batches
         out: list[ProbabilityResult] = []
-        for i, raw in enumerate(results_raw):
-            out.append(self._parse_logprobs(raw, seed_lens[i], logprob_starts[i]))
+        for batch_start in range(0, len(prompts), max_batch_size):
+            batch_end = min(batch_start + max_batch_size, len(prompts))
+            batch_prompts = prompts[batch_start:batch_end]
+            batch_seed_lens = seed_lens[batch_start:batch_end]
+            batch_logprob_starts = logprob_starts[batch_start:batch_end]
+
+            results_raw = self.engine.generate(
+                prompt=batch_prompts,
+                sampling_params=[{"max_new_tokens": 0, "temperature": 0}] * len(batch_prompts),
+                return_logprob=[True] * len(batch_prompts),
+                logprob_start_len=batch_logprob_starts,
+                top_logprobs_num=[1] * len(batch_prompts),
+            )
+
+            for i, raw in enumerate(results_raw):
+                out.append(self._parse_logprobs(raw, batch_seed_lens[i], batch_logprob_starts[i]))
+
         return out
 
     # ------------------------------------------------------------------
