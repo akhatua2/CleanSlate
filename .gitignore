@@ -19,3 +19,10 @@ results/
 data/
 outputs/
 book_paper.txt
+
+# Environment / secrets
+.env
+
+# Books data cache (raw Gutenberg downloads + parquet)
+scripts/books-data/cache/
+scripts/books-data/*.parquet
