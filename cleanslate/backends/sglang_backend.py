@@ -17,8 +17,24 @@ Important: Scripts using this backend MUST use `if __name__ == '__main__':` guar
 import json
 import logging
 import math
+import os
 import time
 from typing import Any
+
+# Suppress all SGLang/torch verbose output
+os.environ["SGLANG_LOG_LEVEL"] = "error"
+os.environ["SGLANG_LOGGING_LEVEL"] = "error"
+os.environ["GLOO_LOG_LEVEL"] = "error"
+os.environ["NCCL_DEBUG"] = "ERROR"
+os.environ["TQDM_DISABLE"] = "1"  # Disable progress bars in subprocesses
+
+import warnings
+warnings.filterwarnings("ignore", message=".*Gloo.*")
+warnings.filterwarnings("ignore", message=".*safetensors.*")
+
+for name in ["sglang", "sglang.srt", "sglang.srt.server_args", "sglang.srt.entrypoints",
+             "sglang.srt.managers", "torch.distributed", "filelock"]:
+    logging.getLogger(name).setLevel(logging.ERROR)
 
 try:
     from sglang.srt.entrypoints.engine import Engine
@@ -59,14 +75,14 @@ class SGLangBackend(InferenceBackend):
             "disable_cuda_graph": False,
             "cuda_graph_max_bs": 128,
             "chunked_prefill_size": 8192,
+            "log_level": "error",
+            "show_time_cost": False,
+            "disable_flashinfer_autotune": True,
         }
         defaults.update(engine_kwargs)
 
-        logger.info("Loading %s with SGLang Engine...", model_name)
-        logger.info("JSON schema: %s", self._json_output)
         self.engine = Engine(model_path=model_name, **defaults)
         self.tokenizer = self.engine.tokenizer_manager.tokenizer
-        logger.info("Model loaded with SGLang on CUDA.")
 
     @property
     def device(self) -> str:

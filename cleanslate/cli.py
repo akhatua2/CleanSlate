@@ -1,5 +1,30 @@
 """CleanSlate CLI - Sliding window memorization evaluation."""
 
+import os
+import warnings
+
+# Load .env file
+from dotenv import load_dotenv
+load_dotenv()
+
+# Suppress SGLang/NCCL/Gloo verbose output (must be before any imports)
+os.environ["SGLANG_LOG_LEVEL"] = "error"
+os.environ["GLOO_LOG_LEVEL"] = "0"
+os.environ["GLOO_LOG_LEVEL_STR"] = "OFF"
+os.environ["NCCL_DEBUG"] = "ERROR"
+os.environ["NCCL_DEBUG_SUBSYS"] = "INIT"
+os.environ["TQDM_DISABLE"] = "1"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["SAFETENSORS_FAST_GPU"] = "1"
+
+# Suppress verbose warnings from transformers/torch
+warnings.filterwarnings("ignore", message=".*TRANSFORMERS_CACHE.*")
+warnings.filterwarnings("ignore", message=".*cuda.cudart module is deprecated.*")
+warnings.filterwarnings("ignore", message=".*cuda.nvrtc module is deprecated.*")
+warnings.filterwarnings("ignore", message=".*Token indices sequence length.*")
+warnings.filterwarnings("ignore", message=".*Gloo.*")
+
 try:
     import typer
     from rich.console import Console
@@ -9,6 +34,7 @@ except ImportError:
     )
 
 from pathlib import Path
+from typing import Any
 
 from datasets import Dataset, load_dataset
 
@@ -18,6 +44,46 @@ from cleanslate.evaluator import (
 )
 from cleanslate.decoding import create_strategy
 from cleanslate.cli_utils import run_parallel_eval, generate_hf_repo_name
+
+
+# Default dataset for memorization evaluation
+DEFAULT_DATASET = "unlearning-cleanslate/cleanslate_dataset"
+
+# Metadata columns to copy from source dataset to eval results
+METADATA_COLUMNS = ["content_id", "content_title", "content_creators", "content_year"]
+
+# Model aliases: short name -> (full HF path, clean name for repos)
+MODEL_ALIASES: dict[str, tuple[str, str]] = {
+    "llama-8b": ("meta-llama/Llama-3.1-8B", "llama-3_1-8b"),
+    "qwen-8b": ("Qwen/Qwen3-8B", "qwen3-8b"),
+    "qwen-8b-base": ("Qwen/Qwen3-8B-Base", "qwen3-8b-base"),
+    "olmo-7b": ("allenai/Olmo-3-1025-7B", "olmo-3-7b"),
+    "gemma-12b": ("google/gemma-3-12b-pt", "gemma-3-12b"),
+    "nemotron-9b": ("nvidia/NVIDIA-Nemotron-Nano-9B-v2", "nemotron-nano-9b"),
+    "trinity-nano": ("arcee-ai/Trinity-Nano-Base", "trinity-nano"),
+    "gpt-oss-20b": ("openai/gpt-oss-20b", "gpt-oss-20b"),
+}
+
+
+def resolve_model(model: str) -> tuple[str, str]:
+    """Resolve model alias to (full_path, clean_name)."""
+    if model in MODEL_ALIASES:
+        return MODEL_ALIASES[model]
+    # Not an alias - use as-is, derive clean name
+    clean = model.split("/")[-1].lower().replace(".", "_")
+    return model, clean
+
+
+def get_item_name(item: dict[str, Any]) -> str:
+    """Get display name for an item."""
+    return str(item.get("content_title") or item.get("content_id") or "unknown")
+
+
+def copy_metadata(item: dict[str, Any], target: dict[str, Any]) -> None:
+    """Copy metadata columns from source item to target record."""
+    for col in METADATA_COLUMNS:
+        if col in item:
+            target[col] = item[col]
 
 app = typer.Typer(
     name="cleanslate",
@@ -30,10 +96,10 @@ console = Console()
 def eval(
     # Dataset source
     hf_dataset: str = typer.Option(
-        ...,
+        DEFAULT_DATASET,
         "--hf-dataset",
         "-d",
-        help="HuggingFace dataset ID (e.g. unlearning-cleanslate/generated_songs)",
+        help="HuggingFace dataset ID (default: cleanslate_dataset with 250 memorized items)",
     ),
     hf_config: str = typer.Option(
         "default",
@@ -45,24 +111,24 @@ def eval(
     text_col: str = typer.Option(
         "reference_target",
         "--text-col",
-        help="Column containing the text to evaluate (lyrics)",
+        help="Column containing the text to evaluate",
     ),
     # Sampling
     limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Limit number of songs to process"
+        None, "--limit", "-n", help="Limit number of items to process"
     ),
     shuffle: bool = typer.Option(
         False, "--shuffle/--no-shuffle", help="Shuffle before selecting"
     ),
     seed: int = typer.Option(42, "--seed", help="Random seed for shuffle"),
     offset: int = typer.Option(
-        0, "--offset", help="Skip first N songs (for parallel splits)"
+        0, "--offset", help="Skip first N items (for parallel splits)"
     ),
     part_id: str | None = typer.Option(
-        None, "--part-id", help="Part ID for parallel runs (e.g., 'part_0'). Outputs to separate dir, skips HF push."
+        None, "--part-id", help="Part ID for parallel runs (e.g., 'part_0')"
     ),
     indices_file: str | None = typer.Option(
-        None, "--indices-file", help="JSON file with song indices to process (for balanced parallel splits)"
+        None, "--indices-file", help="JSON file with item indices to process"
     ),
     # Model
     model: str = typer.Option(
@@ -98,11 +164,11 @@ def eval(
         help="ROUGE-L threshold for 'reproduced' (any beam >= this). Paper doesn't specify, 0.7 is reasonable.",
     ),
     # Generation settings
-    no_generate: bool = typer.Option(
-        False, "--no-generate", help="Skip generation, only compute p_z"
+    reproduce: bool = typer.Option(
+        False, "--reproduce", "-r", help="Enable reproduction check (generate + compare with BLEU/ROUGE)"
     ),
-    generate_all: bool = typer.Option(
-        True, "--generate-all/--generate-best-only", help="Generate for all windows (default) or only best p_z window"
+    reproduce_all: bool = typer.Option(
+        True, "--reproduce-all/--reproduce-best-only", help="Generate for all windows or only best p_z window"
     ),
     # Decoding strategy
     decode_strategy: str = typer.Option(
@@ -133,22 +199,22 @@ def eval(
     hf_push: str | None = typer.Option(
         None,
         "--hf-push",
-        help="Push results to HuggingFace repo (e.g. unlearning-cleanslate/eval_results)",
+        help="Override HF repo name (default: auto-generated)",
     ),
-    hf_push_auto: bool = typer.Option(
+    no_push: bool = typer.Option(
         False,
-        "--hf-push-auto",
-        help="Auto-generate HF repo name: {org}/eval__{dataset}__{model}__{strategy}",
+        "--no-push",
+        help="Skip pushing to HuggingFace (local only)",
     ),
-    hf_push_org: str = typer.Option(
+    hf_org: str = typer.Option(
         "unlearning-cleanslate",
-        "--hf-push-org",
-        help="HuggingFace org for --hf-push-auto (default: unlearning-cleanslate)",
+        "--hf-org",
+        help="HuggingFace org (default: unlearning-cleanslate)",
     ),
     # Parallelism
     num_gpus: int = typer.Option(
         1, "--num-gpus", "-g",
-        help="Number of GPUs for data parallelism. Splits songs across GPUs."
+        help="Number of GPUs for data parallelism"
     ),
     gpu_ids: str | None = typer.Option(
         None, "--gpu-ids",
@@ -156,62 +222,81 @@ def eval(
     ),
 ):
     """
-    Sliding window memorization evaluation on song lyrics.
+    Sliding window memorization evaluation.
 
-    For each song:
-    1. Slide a window across the lyrics text
+    By default evaluates the cleanslate_dataset (250 memorized songs/books).
+
+    For each item:
+    1. Slide a window across the text
     2. Each window: prefix (seed) + suffix (target)
     3. Compute p_z via teacher forcing
-    4. Generate and compare with BLEU/ROUGE
-    5. Aggregate results: one row per song with summary metrics
+    4. (Optional) With --reproduce: generate and compare with BLEU/ROUGE
 
     Output includes max_p_z, mean_p_z, coverage, and most memorized window details.
     """
     import json
+    import os
     import statistics
 
-    # Handle multi-GPU parallelism (data parallel)
+    # Resolve model alias
+    model_path, model_clean = resolve_model(model)
+
+    # Handle multi-GPU parallelism
     if num_gpus > 1 and part_id is None:
-        run_parallel_eval(
-            console=console,
-            num_gpus=num_gpus,
-            gpu_ids=gpu_ids,
-            hf_dataset=hf_dataset,
-            hf_config=hf_config,
-            text_col=text_col,
-            limit=limit,
-            shuffle=shuffle,
-            seed=seed,
-            model=model,
-            backend=backend,
-            mem_fraction=mem_fraction,
-            cuda_graph_bs=cuda_graph_bs,
-            window_size=window_size,
-            stride=stride,
-            threshold=threshold,
-            no_generate=no_generate,
-            generate_all=generate_all,
-            decode_strategy=decode_strategy,
-            beam_width=beam_width,
-            length_penalty=length_penalty,
-            max_batch_prompts=max_batch_prompts,
-            temperature=temperature,
-            gen_top_k=gen_top_k,
-            capture_top_k=capture_top_k,
-            output_dir=output_dir,
-            hf_push=hf_push,
-            hf_push_auto=hf_push_auto,
-            hf_push_org=hf_push_org,
-        )
-        return
+        if backend == "sglang":
+            # SGLang native DP: set CUDA_VISIBLE_DEVICES and use dp_size
+            if gpu_ids:
+                gpus = [int(g.strip()) for g in gpu_ids.split(",")]
+                if len(gpus) != num_gpus:
+                    console.print(f"[red]Error: --gpu-ids has {len(gpus)} GPUs but --num-gpus is {num_gpus}[/red]")
+                    raise typer.Exit(1)
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
+            else:
+                gpus = list(range(num_gpus))
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
+            # Continue to single-process eval with dp_size set below
+        else:
+            # HuggingFace backend: use subprocess-based parallelism
+            run_parallel_eval(
+                console=console,
+                num_gpus=num_gpus,
+                gpu_ids=gpu_ids,
+                hf_dataset=hf_dataset,
+                hf_config=hf_config,
+                text_col=text_col,
+                limit=limit,
+                shuffle=shuffle,
+                seed=seed,
+                model=model,
+                backend=backend,
+                mem_fraction=mem_fraction,
+                cuda_graph_bs=cuda_graph_bs,
+                window_size=window_size,
+                stride=stride,
+                threshold=threshold,
+                reproduce=reproduce,
+                reproduce_all=reproduce_all,
+                decode_strategy=decode_strategy,
+                beam_width=beam_width,
+                length_penalty=length_penalty,
+                max_batch_prompts=max_batch_prompts,
+                temperature=temperature,
+                gen_top_k=gen_top_k,
+                capture_top_k=capture_top_k,
+                output_dir=output_dir,
+                hf_push=hf_push,
+                no_push=no_push,
+                hf_org=hf_org,
+            )
+            return
 
     console.print(f"[bold]Dataset:[/bold] {hf_dataset} / {hf_config}")
-    console.print(f"[bold]Model:[/bold] {model}")
+    console.print(f"[bold]Model:[/bold] {model_path}")
     console.print(f"[bold]Backend:[/bold] {backend}")
     console.print(f"[bold]Window:[/bold] {window_size} tokens prefix + {window_size} tokens suffix")
     console.print(f"[bold]Stride:[/bold] {stride} tokens")
-    console.print(f"[bold]Generate:[/bold] {not no_generate}")
-    if not no_generate:
+    console.print(f"[bold]Reproduce:[/bold] {reproduce}")
+    if reproduce:
         strategy_info = f"{decode_strategy}"
         if decode_strategy == "beam":
             strategy_info += f" (width={beam_width}, length_penalty={length_penalty}, batch={max_batch_prompts})"
@@ -229,39 +314,39 @@ def eval(
 
         # Load full dataset and select specific indices
         ds = load_dataset(hf_dataset, hf_config, split="train")
-        songs = [ds[i] for i in indices]
-        console.print(f"  Loaded {len(songs)} songs from indices file")
+        items = [ds[i] for i in indices]
+        console.print(f"  Loaded {len(items)} items from indices file")
     else:
         # Original streaming approach with offset/limit
         ds_stream = load_dataset(hf_dataset, hf_config, split="train", streaming=True)
 
-        songs = []
+        items = []
         for i, row in enumerate(ds_stream):
             if i < offset:
                 continue
-            if limit and len(songs) >= limit:
+            if limit and len(items) >= limit:
                 break
-            songs.append(row)
+            items.append(row)
 
         if shuffle:
             import random
             random.seed(seed)
-            random.shuffle(songs)
+            random.shuffle(items)
 
-        console.print(f"  Loaded {len(songs)} songs")
+        console.print(f"  Loaded {len(items)} items")
     console.print()
 
     # Validate text column
-    if songs and text_col not in songs[0]:
+    if items and text_col not in items[0]:
         console.print(f"[red]Error: text column '{text_col}' not found[/red]")
-        console.print(f"Available columns: {list(songs[0].keys())}")
+        console.print(f"Available columns: {list(items[0].keys())}")
         raise typer.Exit(1)
 
     # Create config
     config = MemorizationConfig(
         compute_top_k=40,
         tau_min=threshold,
-        do_generate=not no_generate,
+        do_generate=reproduce,
         gen_temperature=temperature,
         gen_top_k=gen_top_k,
         gen_max_new_tokens=window_size,  # Generate same length as suffix
@@ -296,8 +381,11 @@ def eval(
     if backend == "sglang":
         backend_kwargs["mem_fraction_static"] = mem_fraction
         backend_kwargs["cuda_graph_max_bs"] = cuda_graph_bs
+        # Use native DP if num_gpus > 1
+        if num_gpus > 1:
+            backend_kwargs["dp_size"] = num_gpus
     evaluator = MemorizationEvaluator(
-        model=model,
+        model=model_path,
         backend=backend,
         config=config,
         **backend_kwargs,
@@ -327,30 +415,48 @@ def eval(
                 json_mod.dump({"current": current, "total": total}, f)
 
     from tqdm import tqdm
+    from cleanslate.cli_utils import estimate_windows
 
-    # Auto-batch songs for better GPU utilization (only when not generating)
-    # Use conservative batch size that works for all models including MoE
-    # 10 songs × ~15 windows = ~150 windows per batch (safe for all models)
-    SONG_BATCH_SIZE = 10
+    # Target windows per batch (balances GPU utilization vs memory)
+    TARGET_WINDOWS_PER_BATCH = 500
 
-    if no_generate:
-        # OPTIMIZED PATH: Batch songs together for much better GPU utilization
-        # Filter valid songs first
-        valid_songs = [(i, s) for i, s in enumerate(songs) if s.get(text_col) and len(s.get(text_col, "").strip()) >= 10]
+    if not reproduce:
+        # OPTIMIZED PATH: Batch by window count for balanced GPU utilization
+        # Filter valid items and estimate windows
+        valid_items = []
+        for i, s in enumerate(items):
+            text = s.get(text_col, "")
+            if text and len(text.strip()) >= 10:
+                est_windows = estimate_windows(text, window_size, stride)
+                valid_items.append((i, s, est_windows))
 
-        num_batches = (len(valid_songs) + SONG_BATCH_SIZE - 1) // SONG_BATCH_SIZE
-        batch_iter = range(0, len(valid_songs), SONG_BATCH_SIZE)
+        # Create batches targeting ~TARGET_WINDOWS_PER_BATCH windows each
+        batches = []
+        current_batch = []
+        current_windows = 0
+        for item_data in valid_items:
+            idx, item, est_win = item_data
+            if current_windows + est_win > TARGET_WINDOWS_PER_BATCH and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_windows = 0
+            current_batch.append((idx, item, est_win))
+            current_windows += est_win
+        if current_batch:
+            batches.append(current_batch)
 
+        total_est_windows = sum(w for _, _, w in valid_items)
         if not part_id:
-            batch_iter = tqdm(list(batch_iter), desc=f"Processing song batches ({SONG_BATCH_SIZE} songs/batch)")
+            console.print(f"  Estimated windows: {total_est_windows} ({len(batches)} batches)")
 
-        for batch_start in batch_iter:
-            batch_end = min(batch_start + SONG_BATCH_SIZE, len(valid_songs))
-            batch_songs = valid_songs[batch_start:batch_end]
+        batch_iter = batches if part_id else tqdm(batches, desc="Processing batches")
+
+        for batch in batch_iter:
+            batch_items = [(idx, item) for idx, item, _ in batch]
 
             # Prepare batch data
-            texts = [s[text_col] for _, s in batch_songs]
-            names = [s.get("song_title") or s.get("song_id", f"song_{i}") for i, s in batch_songs]
+            texts = [item[text_col] for _, item in batch_items]
+            names = [get_item_name(item) for _, item in batch_items]
 
             # Run batched sliding window
             sw_results = evaluator.sliding_window_batch(
@@ -361,28 +467,16 @@ def eval(
             )
 
             # Process results
-            for (orig_idx, song), sw_result in zip(batch_songs, sw_results):
-                update_progress(orig_idx, len(songs))
+            for (orig_idx, item), sw_result in zip(batch_items, sw_results):
+                update_progress(orig_idx + 1, len(items))
 
                 if not sw_result.windows:
                     continue
 
-                # Get song metadata
-                song_id = song.get("song_id", "")
-                song_title = song.get("song_title", "")
-                song_artists = song.get("song_artists", [])
-                song_year = song.get("song_year")
-                prompt_template = song.get("prompt_template", "")
-                seed_mode = song.get("seed_mode", "")
-                text = song[text_col]
+                text = item[text_col]
 
                 # Find most memorized window
                 best_window = max(sw_result.windows, key=lambda w: w.p_z)
-                best_window_idx = best_window.window_idx
-
-                # No generation in this path
-                gen_results_map = {}
-                best_window_gen = None
 
                 # Aggregate metrics
                 p_z_values = [w.p_z for w in sw_result.windows]
@@ -406,15 +500,8 @@ def eval(
                     windows_array.append(window_data)
 
                 record = {
-                    # Song metadata
-                    "song_id": song_id,
-                    "song_title": song_title,
-                    "song_artists": song_artists,
-                    "song_year": song_year,
-                    "prompt_template": prompt_template,
-                    "seed_mode": seed_mode,
+                    # Evaluation metrics
                     "text_length_chars": len(text),
-                    # Aggregated metrics
                     "num_windows": sw_result.total_windows,
                     "memorized_windows": sw_result.memorized_windows,
                     "memorized_fraction": sw_result.memorized_windows / sw_result.total_windows,
@@ -439,7 +526,7 @@ def eval(
                     "best_window_target": best_window.target,
                     "best_window_start_char": best_window.window_start_char,
                     "best_window_end_char": best_window.window_end_char,
-                    # Generation for best window (empty for no_generate)
+                    # Generation for best window (empty when reproduce=False)
                     "best_window_generated": None,
                     "best_window_beams": None,
                     "best_window_bleu_1": None,
@@ -448,51 +535,47 @@ def eval(
                     "best_window_any_exact_match": None,
                     "best_window_max_bleu_1": None,
                     "best_window_max_rouge_l": None,
-                    # Average generation metrics (empty for no_generate)
+                    # Average generation metrics (empty when reproduce=False)
                     "avg_max_bleu_1": None,
                     "avg_max_rouge_l": None,
                     "avg_any_exact_match": None,
                     # Eval config
-                    "eval_model": model,
+                    "eval_model": model_path,
                     "eval_threshold": threshold,
                     "window_size": window_size,
                     "stride": stride,
                     "decode_strategy": decode_strategy,
                     "beam_width": beam_width if decode_strategy == "beam" else None,
                     "length_penalty": length_penalty if decode_strategy == "beam" else None,
-                    "generate_all_windows": generate_all,
+                    "reproduce_all_windows": reproduce_all,
                     # All windows (array)
                     "windows": windows_array,
                 }
+                # Copy metadata columns from source item
+                copy_metadata(item, record)
                 all_records.append(record)
 
                 total_windows += sw_result.total_windows
                 total_memorized += sw_result.memorized_windows
 
-        # Skip the old per-song loop for no_generate path
-        update_progress(len(songs), len(songs))
+        # Skip the per-item loop when not reproducing
+        update_progress(len(items), len(items))
 
     else:
-        # ORIGINAL PATH: Per-song processing with generation
-        song_iter = songs if part_id else tqdm(songs, desc="Processing songs")
-        for song_idx, song in enumerate(song_iter):
-            update_progress(song_idx, len(songs))
-            text = song[text_col]
+        # ORIGINAL PATH: Per-item processing with generation
+        item_iter = items if part_id else tqdm(items, desc="Processing items")
+        for item_idx, item in enumerate(item_iter):
+            update_progress(item_idx, len(items))
+            text = item[text_col]
             if not text or len(text.strip()) < 10:
                 continue
 
-            # Get song metadata
-            song_id = song.get("song_id", "")
-            song_title = song.get("song_title", "")
-            song_artists = song.get("song_artists", [])
-            song_year = song.get("song_year")
-            prompt_template = song.get("prompt_template", "")
-            seed_mode = song.get("seed_mode", "")
+            item_name = get_item_name(item)
 
             # Run sliding window
             sw_result = evaluator.sliding_window(
                 text=text,
-                name=song_title or song_id,
+                name=item_name,
                 show_progress=False,
             )
 
@@ -541,7 +624,7 @@ def eval(
                         "best_match_beam_idx": best_bleu_idx,
                     }
 
-                if generate_all:
+                if reproduce_all:
                     # Batch generate for ALL windows using strategy
                     window_seeds = [w.seed for w in sw_result.windows]
                     decode_outputs = evaluator._get_backend().generate_batch(
@@ -619,15 +702,8 @@ def eval(
                 windows_array.append(window_data)
 
             record = {
-                # Song metadata
-                "song_id": song_id,
-                "song_title": song_title,
-                "song_artists": song_artists,
-                "song_year": song_year,
-                "prompt_template": prompt_template,
-                "seed_mode": seed_mode,
+                # Evaluation metrics
                 "text_length_chars": len(text),
-                # Aggregated metrics
                 "num_windows": sw_result.total_windows,
                 "memorized_windows": sw_result.memorized_windows,
                 "memorized_fraction": sw_result.memorized_windows / sw_result.total_windows,
@@ -661,23 +737,25 @@ def eval(
                 "best_window_any_exact_match": best_window_gen["any_exact_match"] if best_window_gen else None,
                 "best_window_max_bleu_1": best_window_gen["max_bleu_1"] if best_window_gen else None,
                 "best_window_max_rouge_l": best_window_gen["max_rouge_l"] if best_window_gen else None,
-                # Average generation metrics (across all windows when generate_all=True)
+                # Average generation metrics (across all windows when reproduce_all=True)
                 # These use max across beams for each window, then average across windows
                 "avg_max_bleu_1": avg_bleu_1,
                 "avg_max_rouge_l": avg_rouge_l,
                 "avg_any_exact_match": avg_any_exact,
                 # Eval config
-                "eval_model": model,
+                "eval_model": model_path,
                 "eval_threshold": threshold,
                 "window_size": window_size,
                 "stride": stride,
                 "decode_strategy": decode_strategy,
                 "beam_width": beam_width if decode_strategy == "beam" else None,
                 "length_penalty": length_penalty if decode_strategy == "beam" else None,
-                "generate_all_windows": generate_all,
+                "reproduce_all_windows": reproduce_all,
                 # All windows (array)
                 "windows": windows_array,
             }
+            # Copy metadata columns from source item
+            copy_metadata(item, record)
             all_records.append(record)
 
             total_windows += sw_result.total_windows
@@ -685,13 +763,13 @@ def eval(
             total_reproduced += record["reproduced_windows"]
 
         # Final progress update for else block
-        update_progress(len(songs), len(songs))
+        update_progress(len(items), len(items))
 
     # Display summary (skip for workers)
     if not part_id:
         console.print()
         console.print("[bold]Summary:[/bold]")
-        console.print(f"  Songs processed: {len(all_records)}")
+        console.print(f"  Items processed: {len(all_records)}")
         console.print(f"  Total windows: {total_windows}")
 
         console.print()
@@ -702,10 +780,10 @@ def eval(
                 f"({total_memorized/total_windows:.1%})"
             )
         if all_records:
-            songs_with_memorization = sum(1 for r in all_records if r["memorized_windows"] > 0)
+            items_with_memorization = sum(1 for r in all_records if r["memorized_windows"] > 0)
             console.print(
-                f"    Songs with memorization: {songs_with_memorization}/{len(all_records)} "
-                f"({songs_with_memorization/len(all_records):.1%})"
+                f"    Items with memorization: {items_with_memorization}/{len(all_records)} "
+                f"({items_with_memorization/len(all_records):.1%})"
             )
 
         console.print()
@@ -716,10 +794,10 @@ def eval(
                 f"({total_reproduced/total_windows:.1%})"
             )
         if all_records:
-            songs_with_reproduction = sum(1 for r in all_records if r["reproduced_windows"] > 0)
+            items_with_reproduction = sum(1 for r in all_records if r["reproduced_windows"] > 0)
             console.print(
-                f"    Songs with reproduction: {songs_with_reproduction}/{len(all_records)} "
-                f"({songs_with_reproduction/len(all_records):.1%})"
+                f"    Items with reproduction: {items_with_reproduction}/{len(all_records)} "
+                f"({items_with_reproduction/len(all_records):.1%})"
             )
 
         if all_records:
@@ -740,7 +818,7 @@ def eval(
                     console.print(f"  Mean max ROUGE-L: {sum(avg_rouge_values)/len(avg_rouge_values):.3f}")
                     console.print(f"  Mean any exact match: {sum(avg_exact_values)/len(avg_exact_values):.3f}")
                 else:
-                    # Fallback to best window metrics if generate_all wasn't used
+                    # Fallback to best window metrics if reproduce_all wasn't used
                     bleu_values = [r["best_window_max_bleu_1"] for r in all_records if r["best_window_max_bleu_1"] is not None]
                     any_exact = [r["best_window_any_exact_match"] for r in all_records if r["best_window_any_exact_match"] is not None]
                     if bleu_values:
@@ -770,8 +848,8 @@ def eval(
         "decode_strategy": decode_strategy,
         "beam_width": beam_width if decode_strategy == "beam" else None,
         "length_penalty": length_penalty if decode_strategy == "beam" else None,
-        "generate_all_windows": generate_all,
-        "num_songs": len(all_records),
+        "reproduce_all_windows": reproduce_all,
+        "num_items": len(all_records),
         "total_windows": total_windows,
         "memorized_windows": total_memorized,
     }
@@ -783,40 +861,17 @@ def eval(
         results_ds = Dataset.from_list(all_records)
         parquet_path = output_path / "results.parquet"
         results_ds.to_parquet(str(parquet_path))
-        console.print(f"  Saved {len(all_records)} song results to {parquet_path}")
+        console.print(f"  Saved {len(all_records)} results to {parquet_path}")
 
-        # Push to HuggingFace (skip if part_id is set - merge script handles push)
-        # Determine HF repo name (explicit or auto-generated)
-        effective_hf_push = hf_push
-        if hf_push_auto and not hf_push:
-            effective_hf_push = generate_hf_repo_name(
-                org=hf_push_org,
-                dataset=hf_dataset,
-                config=hf_config,
-                model=model,
-                decode_strategy=decode_strategy,
-                beam_width=beam_width if decode_strategy == "beam" else None,
-                length_penalty=length_penalty if decode_strategy == "beam" else None,
-            )
-            console.print(f"[dim]Auto-generated HF repo: {effective_hf_push}[/dim]")
-
-        if effective_hf_push and not part_id:
+        # Push to HuggingFace (default behavior, skip with --no-push)
+        if not no_push and not part_id:
+            repo_name = hf_push or generate_hf_repo_name(hf_org, hf_dataset, model_clean)
             console.print()
-            console.print(f"[bold]Pushing to HuggingFace: {effective_hf_push}[/bold]")
-
-            results_ds.push_to_hub(
-                effective_hf_push,
-                config_name=hf_config,
-                split="train",
-            )
-            console.print(
-                f"[green]Pushed to https://huggingface.co/datasets/{effective_hf_push} "
-                f"(config: {hf_config})[/green]"
-            )
-        elif effective_hf_push and part_id:
-            console.print(
-                f"[yellow]Skipping HF push (part_id={part_id}). Run merge script to combine and push.[/yellow]"
-            )
+            console.print(f"[bold]Pushing to HuggingFace: {repo_name}[/bold]")
+            results_ds.push_to_hub(repo_name, split="train")
+            console.print(f"[green]Pushed to https://huggingface.co/datasets/{repo_name}[/green]")
+        elif part_id:
+            console.print("[dim]Skipping HF push (parallel worker)[/dim]")
     else:
         console.print("[yellow]No results to save (no valid songs)[/yellow]")
 
@@ -846,7 +901,8 @@ def probe(
         window_stride=stride,
     )
 
-    evaluator = MemorizationEvaluator(model=model, backend=backend, config=config)
+    model_path, _ = resolve_model(model)
+    evaluator = MemorizationEvaluator(model=model_path, backend=backend, config=config)
     result = evaluator.sliding_window(text, name="probe", show_progress=True)
 
     console.print()
@@ -864,6 +920,91 @@ def probe(
                 console.print(f"  Window {w.window_idx}: p_z={w.p_z:.6f}")
                 console.print(f"    prefix: {w.seed[:60]}...")
                 console.print(f"    suffix: {w.target[:60]}...")
+
+
+@app.command("eval-all")
+def eval_all(
+    models: str = typer.Option(
+        None, "--models", "-m",
+        help="Comma-separated model aliases to run (default: all)"
+    ),
+    num_gpus: int = typer.Option(
+        1, "--num-gpus", "-g", help="Number of GPUs per model"
+    ),
+    gpu_ids: str = typer.Option(
+        None, "--gpu-ids", help="GPU IDs to use (e.g. '0,1,2,3')"
+    ),
+    skip_existing: bool = typer.Option(
+        True, "--skip-existing/--no-skip-existing",
+        help="Skip models that already have results on HuggingFace"
+    ),
+):
+    """Run eval for all models sequentially."""
+    import subprocess
+    import sys
+
+    # Determine which models to run
+    if models:
+        model_list = [m.strip() for m in models.split(",")]
+        invalid = [m for m in model_list if m not in MODEL_ALIASES]
+        if invalid:
+            console.print(f"[red]Unknown models: {invalid}[/red]")
+            console.print(f"Available: {list(MODEL_ALIASES.keys())}")
+            raise typer.Exit(1)
+    else:
+        model_list = list(MODEL_ALIASES.keys())
+
+    console.print(f"[bold]Running eval for {len(model_list)} models:[/bold]")
+    for m in model_list:
+        console.print(f"  - {m} ({MODEL_ALIASES[m][0]})")
+    console.print()
+
+    # Check for existing results if skip_existing
+    if skip_existing:
+        from huggingface_hub import list_datasets
+        existing_repos = {ds.id for ds in list_datasets(author="unlearning-cleanslate")}
+        to_skip = []
+        for m in model_list:
+            _, clean_name = MODEL_ALIASES[m]
+            repo = f"unlearning-cleanslate/eval_cleanslate_dataset_{clean_name}"
+            if repo in existing_repos:
+                to_skip.append(m)
+        if to_skip:
+            console.print(f"[yellow]Skipping (already exist): {to_skip}[/yellow]")
+            model_list = [m for m in model_list if m not in to_skip]
+            console.print()
+
+    if not model_list:
+        console.print("[green]All models already evaluated![/green]")
+        return
+
+    # Run eval for each model
+    results = {}
+    for i, model in enumerate(model_list, 1):
+        console.print(f"\n[bold blue]{'='*60}[/bold blue]")
+        console.print(f"[bold blue]Model {i}/{len(model_list)}: {model}[/bold blue]")
+        console.print(f"[bold blue]{'='*60}[/bold blue]\n")
+
+        cmd = [sys.executable, "-m", "cleanslate.cli", "eval", "-m", model]
+        cmd.extend(["--num-gpus", str(num_gpus)])
+        if gpu_ids:
+            cmd.extend(["--gpu-ids", gpu_ids])
+
+        try:
+            subprocess.run(cmd, check=True)
+            results[model] = "success"
+            console.print(f"\n[green]✓ {model} completed[/green]")
+        except subprocess.CalledProcessError as e:
+            results[model] = f"failed (exit {e.returncode})"
+            console.print(f"\n[red]✗ {model} failed[/red]")
+
+    # Summary
+    console.print(f"\n[bold]{'='*60}[/bold]")
+    console.print("[bold]Summary:[/bold]")
+    for model, status in results.items():
+        icon = "✓" if status == "success" else "✗"
+        color = "green" if status == "success" else "red"
+        console.print(f"  [{color}]{icon} {model}: {status}[/{color}]")
 
 
 def main():

@@ -11,7 +11,7 @@ dependencies = [
     "fastparquet>=2025.12.0",
     "ipykernel>=7.1.0",
     "polars>=1.37.1",
-    "dotenv>=0.9.9",
+    "python-dotenv",
     "pip3-autoremove>=2.0.1",
     "datasets>=4.5.0",
 ]

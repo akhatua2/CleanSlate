@@ -916,8 +916,17 @@ class MemorizationEvaluator:
         config = self.config
         tokenizer = self.tokenizer
 
-        # Tokenize entire text
-        tokens = tokenizer.encode(text, add_special_tokens=False)
+        # Tokenize with offset mapping for fast char position lookup
+        # This avoids O(n) decode calls - offsets come directly from tokenizer
+        try:
+            encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+            tokens = encoding["input_ids"]
+            offsets = encoding["offset_mapping"]  # List of (start_char, end_char) per token
+        except Exception:
+            # Fallback for tokenizers that don't support offset_mapping
+            tokens = tokenizer.encode(text, add_special_tokens=False)
+            offsets = None
+
         total_tokens = len(tokens)
 
         window_size = config.window_prefix_len + config.window_suffix_len
@@ -930,7 +939,6 @@ class MemorizationEvaluator:
             return []
 
         windows: list[WindowInfo] = []
-        char_offset = 0
 
         for start_token in range(
             0, total_tokens - window_size + 1, config.window_stride
@@ -944,10 +952,13 @@ class MemorizationEvaluator:
             prefix_text = tokenizer.decode(prefix_ids)
             suffix_text = tokenizer.decode(suffix_ids)
 
-            # Calculate character positions
-            prefix_before = tokenizer.decode(tokens[:start_token])
-            start_char = len(prefix_before)
-            end_char = start_char + len(prefix_text) + len(suffix_text)
+            # Get character positions from offset mapping (fast) or estimate
+            if offsets is not None:
+                start_char = offsets[start_token][0]
+                end_char = offsets[suffix_end - 1][1]
+            else:
+                start_char = 0
+                end_char = 0
 
             windows.append(
                 WindowInfo(

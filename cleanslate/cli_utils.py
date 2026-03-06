@@ -24,40 +24,19 @@ except ImportError:
     raise ImportError("CLI dependencies not installed. Install with: pip install cleanslate[cli]")
 
 
-def generate_hf_repo_name(
-    org: str,
-    dataset: str,
-    config: str,
-    model: str,
-    decode_strategy: str,
-    beam_width: int | None = None,
-    length_penalty: float | None = None,
-) -> str:
-    """Generate descriptive HF repo name for eval results.
+def generate_hf_repo_name(org: str, dataset: str, model_clean: str) -> str:
+    """Generate HF repo name for eval results.
 
-    Format: {org}/eval__{dataset}__{config}__{model}__{strategy}
-    Example: unlearning-cleanslate/eval__top200_songs__direct_first_line__qwen2.5-7b__beam_w5
+    Format: {org}/eval_{dataset}_{model}
+    Example: unlearning-cleanslate/eval_cleanslate_dataset_llama-3_1-8b
     """
-
     def sanitize(s: str) -> str:
-        """Sanitize string for HF repo name."""
         s = s.split("/")[-1]
         s = re.sub(r"[^a-z0-9_-]", "_", s.lower())
         s = re.sub(r"_+", "_", s)
         return s.strip("_")
 
-    dataset_clean = sanitize(dataset)
-    config_clean = sanitize(config)
-    model_clean = sanitize(model)
-
-    if decode_strategy == "beam" and beam_width is not None:
-        strategy_str = f"beam_w{beam_width}"
-        if length_penalty is not None and length_penalty != 1.0:
-            strategy_str += f"_lp{length_penalty}"
-    else:
-        strategy_str = decode_strategy
-
-    return f"{org}/eval__{dataset_clean}__{config_clean}__{model_clean}__{strategy_str}"
+    return f"{org}/eval_{sanitize(dataset)}_{model_clean}"
 
 
 def make_flame_graph(windows: list, width: int = 20, metric: str = "p_z") -> str:
@@ -211,8 +190,8 @@ def run_parallel_eval(
     window_size: int,
     stride: int,
     threshold: float,
-    no_generate: bool,
-    generate_all: bool,
+    reproduce: bool,
+    reproduce_all: bool,
     decode_strategy: str,
     beam_width: int,
     length_penalty: float,
@@ -222,8 +201,8 @@ def run_parallel_eval(
     capture_top_k: int,
     output_dir: str,
     hf_push: str | None,
-    hf_push_auto: bool,
-    hf_push_org: str,
+    no_push: bool,
+    hf_org: str,
 ) -> None:
     """Run evaluation in parallel across multiple GPUs."""
     from datasets import Dataset, load_dataset
@@ -243,8 +222,8 @@ def run_parallel_eval(
 
     console.print(f"[bold]Using GPUs:[/bold] {gpus}")
 
-    # Load songs and estimate windows for balanced splitting
-    console.print("[bold]Loading songs and estimating windows...[/bold]")
+    # Load items and estimate windows for balanced splitting
+    console.print("[bold]Loading items and estimating windows...[/bold]")
     ds = load_dataset(hf_dataset, hf_config, split="train")
 
     if shuffle:
@@ -252,23 +231,23 @@ def run_parallel_eval(
     if limit:
         ds = ds.select(range(min(limit, len(ds))))
 
-    # Estimate window count per song
-    song_windows: list[tuple[int, int]] = []  # (song_idx, estimated_windows)
+    # Estimate window count per item
+    item_windows: list[tuple[int, int]] = []  # (item_idx, estimated_windows)
     for i, row in enumerate(ds):
         text = row.get(text_col, "")
         est_windows = estimate_windows(text, window_size, stride)
-        song_windows.append((i, est_windows))
+        item_windows.append((i, est_windows))
 
-    total_songs = len(song_windows)
-    total_windows_est = sum(w for _, w in song_windows)
-    console.print(f"  Total songs: {total_songs}")
+    total_items = len(item_windows)
+    total_windows_est = sum(w for _, w in item_windows)
+    console.print(f"  Total items: {total_items}")
     console.print(f"  Estimated windows: {total_windows_est}")
 
     # Sort by window count (largest first) for better bin-packing
-    song_windows_sorted = sorted(song_windows, key=lambda x: x[1], reverse=True)
+    item_windows_sorted = sorted(item_windows, key=lambda x: x[1], reverse=True)
 
     # Greedy bin-packing to balance windows across GPUs
-    gpu_assignments = greedy_bin_pack(song_windows_sorted, num_gpus)
+    gpu_assignments = greedy_bin_pack(item_windows_sorted, num_gpus)
 
     # Build base command
     base_cmd = [
@@ -295,12 +274,12 @@ def run_parallel_eval(
         "--num-gpus", "1",
     ]
 
-    if no_generate:
-        base_cmd.append("--no-generate")
-    if generate_all:
-        base_cmd.append("--generate-all")
+    if reproduce:
+        base_cmd.append("--reproduce")
+    if reproduce_all:
+        base_cmd.append("--reproduce-all")
     else:
-        base_cmd.append("--generate-best-only")
+        base_cmd.append("--reproduce-best-only")
     # Don't pass shuffle - we already shuffled and assigned indices
 
     # Create progress and assignments directories
@@ -327,7 +306,7 @@ def run_parallel_eval(
         gpu_id = gpus[i]
         part_name = f"part_{i}"
         assignment_file = assignments_dir / f"part_{i}.json"
-        est_windows = sum(song_windows[idx][1] for idx in indices)
+        est_windows = sum(item_windows[idx][1] for idx in indices)
 
         cmd = base_cmd + [
             "--indices-file", str(assignment_file),
@@ -348,22 +327,22 @@ def run_parallel_eval(
     # Initialize GPU monitoring
     gpu_handles = get_gpu_handles(gpus)
 
-    # Build process info with both song count and estimated windows
+    # Build process info with both item count and estimated windows
     process_info = []
     for i, indices in enumerate(gpu_assignments):
         gpu_id = gpus[i]
-        num_songs = len(indices)
-        est_windows = sum(song_windows[idx][1] for idx in indices)
+        num_items = len(indices)
+        est_windows = sum(item_windows[idx][1] for idx in indices)
         proc = processes[i][3]  # Get proc from processes list
-        process_info.append((i, gpu_id, num_songs, est_windows, proc))
+        process_info.append((i, gpu_id, num_items, est_windows, proc))
 
-    # Monitor progress (track songs, but total work is balanced by windows)
+    # Monitor progress (track items, but total work is balanced by windows)
     with Progress(
         SpinnerColumn(),
         TextColumn("[bold]{task.description}"),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("{task.completed}/{task.total} songs"),
+        TextColumn("{task.completed}/{task.total} items"),
         TextColumn("[dim]~{task.fields[est_windows]}w[/dim]"),
         TextColumn("{task.fields[gpu_stats]}"),
         TimeElapsedColumn(),
@@ -373,13 +352,13 @@ def run_parallel_eval(
         refresh_per_second=2,
     ) as progress:
         tasks = {}
-        for i, gpu_id, num_songs, est_windows, proc in process_info:
-            task_id = progress.add_task(f"GPU {gpu_id}", total=num_songs, completed=0, gpu_stats="", est_windows=est_windows)
+        for i, gpu_id, num_items, est_windows, proc in process_info:
+            task_id = progress.add_task(f"GPU {gpu_id}", total=num_items, completed=0, gpu_stats="", est_windows=est_windows)
             tasks[i] = (task_id, gpu_id, est_windows)
 
         while True:
             all_done = True
-            for i, gpu_id, num_songs, est_windows, proc in process_info:
+            for i, gpu_id, num_items, est_windows, proc in process_info:
                 ret = proc.poll()
                 if ret is None:
                     all_done = False
@@ -398,7 +377,7 @@ def run_parallel_eval(
                 progress.update(task_id, completed=completed, gpu_stats=get_gpu_stats(gpu_id, gpu_handles), est_windows=est_w)
 
             if all_done:
-                for i, gpu_id, num_songs, est_windows, proc in process_info:
+                for i, gpu_id, num_items, est_windows, proc in process_info:
                     progress_file = progress_dir / f"part_{i}.json"
                     if progress_file.exists():
                         try:
@@ -416,7 +395,7 @@ def run_parallel_eval(
 
     # Check for failures
     failed = []
-    for i, gpu_id, num_songs, est_windows, proc in process_info:
+    for i, gpu_id, num_items, est_windows, proc in process_info:
         ret = proc.wait()
         if ret != 0:
             failed.append((i, gpu_id, ret))
@@ -451,12 +430,12 @@ def run_parallel_eval(
     merged_ds.to_parquet(str(merged_parquet))
 
     # Compute summary stats
-    songs_with_memorization = sum(1 for r in all_records if r.get("memorized_windows", 0) > 0)
+    items_with_memorization = sum(1 for r in all_records if r.get("memorized_windows", 0) > 0)
     total_memorized_windows = sum(r.get("memorized_windows", 0) for r in all_records)
     total_windows = sum(r.get("num_windows", 0) for r in all_records)
 
     # Reproduction stats (from windows)
-    songs_with_reproduction = sum(1 for r in all_records if r.get("reproduced_windows", 0) > 0)
+    items_with_reproduction = sum(1 for r in all_records if r.get("reproduced_windows", 0) > 0)
     total_reproduced_windows = sum(r.get("reproduced_windows", 0) for r in all_records)
 
     sorted_by_pz = sorted(all_records, key=lambda r: r.get("max_p_z", 0), reverse=True)
@@ -467,56 +446,48 @@ def run_parallel_eval(
     # Display summary
     console.print()
     console.print("[bold]Summary:[/bold]")
-    console.print(f"  Songs: {len(all_records)}")
+    console.print(f"  Items: {len(all_records)}")
     console.print()
     console.print("[bold]  Memorization[/bold] [dim](p_z > τ_min, teacher forcing)[/dim]")
-    console.print(f"    Songs with memorization: {songs_with_memorization}/{len(all_records)} ({songs_with_memorization/len(all_records):.1%})")
+    console.print(f"    Items with memorization: {items_with_memorization}/{len(all_records)} ({items_with_memorization/len(all_records):.1%})")
     if total_windows > 0:
         console.print(f"    Memorized windows: {total_memorized_windows}/{total_windows} ({total_memorized_windows/total_windows:.1%})")
     console.print()
     console.print("[bold]  Reproduction[/bold] [dim](ROUGE-L > threshold, beam generation)[/dim]")
-    console.print(f"    Songs with reproduction: {songs_with_reproduction}/{len(all_records)} ({songs_with_reproduction/len(all_records):.1%})")
+    console.print(f"    Items with reproduction: {items_with_reproduction}/{len(all_records)} ({items_with_reproduction/len(all_records):.1%})")
     if total_windows > 0:
         console.print(f"    Reproduced windows: {total_reproduced_windows}/{total_windows} ({total_reproduced_windows/total_windows:.1%})")
 
+    def get_item_title(record: dict) -> str:
+        """Get display title from record."""
+        title = record.get("content_title") or record.get("content_id") or "Unknown"
+        return str(title)[:25]
+
     console.print()
     console.print("[bold]Top memorized[/bold] [dim](by p_z)[/dim]:")
-    for i, song in enumerate(top_memorized, 1):
-        title = song.get("song_title", "Unknown")[:25]
-        pz = song.get("max_p_z", 0)
-        windows = song.get("windows", [])
+    for i, item in enumerate(top_memorized, 1):
+        title = get_item_title(item)
+        pz = item.get("max_p_z", 0)
+        windows = item.get("windows", [])
         flame_pz = make_flame_graph(windows, width=20, metric="p_z")
         console.print(f"  {i}. {title:<25} {flame_pz} p_z={pz:.2e}")
 
     console.print()
     console.print("[bold]Top reproduced[/bold] [dim](by avg ROUGE-L)[/dim]:")
-    for i, song in enumerate(top_reproduced, 1):
-        title = song.get("song_title", "Unknown")[:25]
-        avg_rouge = song.get("avg_rouge_l", 0)
-        windows = song.get("windows", [])
+    for i, item in enumerate(top_reproduced, 1):
+        title = get_item_title(item)
+        avg_rouge = item.get("avg_rouge_l", 0)
+        windows = item.get("windows", [])
         flame_rouge = make_flame_graph(windows, width=20, metric="rouge_l")
         console.print(f"  {i}. {title:<25} {flame_rouge} avg={avg_rouge:.2f}")
 
     console.print()
     console.print(f"[dim]Saved: {merged_parquet}[/dim]")
 
-    # Push to HuggingFace
-    effective_hf_push = hf_push
-    if hf_push_auto and not hf_push:
-        effective_hf_push = generate_hf_repo_name(
-            org=hf_push_org,
-            dataset=hf_dataset,
-            config=hf_config,
-            model=model,
-            decode_strategy=decode_strategy,
-            beam_width=beam_width if decode_strategy == "beam" else None,
-            length_penalty=length_penalty if decode_strategy == "beam" else None,
-        )
-
-    if effective_hf_push:
-        merged_ds.push_to_hub(
-            effective_hf_push,
-            config_name=hf_config,
-            split="train",
-        )
-        console.print(f"[green]Pushed: https://huggingface.co/datasets/{effective_hf_push}[/green]")
+    # Push to HuggingFace (default behavior)
+    if not no_push:
+        # Derive clean model name for repo
+        model_clean = model.split("/")[-1].lower().replace(".", "_")
+        repo_name = hf_push or generate_hf_repo_name(hf_org, hf_dataset, model_clean)
+        merged_ds.push_to_hub(repo_name, split="train")
+        console.print(f"[green]Pushed: https://huggingface.co/datasets/{repo_name}[/green]")
