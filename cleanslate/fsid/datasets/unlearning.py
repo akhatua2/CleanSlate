@@ -7,34 +7,37 @@ from torch.utils.data import Dataset as TorchDataset
 
 
 class ForgetPairDataset(TorchDataset):
-    """Tokenized forget pairs with optional cached reference log-probabilities."""
+    """Tokenized forget pairs with labels-based seed masking.
+
+    Returns input_ids, labels (with -100 for seed tokens), and attention_mask.
+    The masking is baked into labels so standard CE loss automatically
+    ignores seed tokens — no need for seed_lens at training time.
+    """
 
     def __init__(self, pairs: list[dict[str, Any]]) -> None:
         self._pairs = pairs
-        self._ref_logps = [0.0] * len(pairs)
-
-    def set_reference_logps(self, values: list[float]) -> None:
-        if len(values) != len(self._pairs):
-            raise ValueError("Reference log-prob list length mismatch.")
-        self._ref_logps = values
 
     def __len__(self) -> int:
         return len(self._pairs)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         item = self._pairs[index]
+        input_ids = item["input_ids"]
+        seed_len = item["seed_len"]
+        # Mask seed tokens with -100 so CE loss ignores them
+        labels = [-100] * seed_len + input_ids[seed_len:]
         return {
-            "index": index,
-            "input_ids": item["input_ids"],
-            "seed_len": item["seed_len"],
-            "song_id": item["song_id"],
-            "request_id": item["request_id"],
-            "ref_logp": self._ref_logps[index],
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": [1] * len(input_ids),
         }
 
 
 class TextSequenceDataset(TorchDataset):
-    """Tokenized text sequences for retain/validation language modeling."""
+    """Tokenized text sequences for retain/validation language modeling.
+
+    All tokens are training targets (labels = input_ids).
+    """
 
     def __init__(self, examples: list[dict[str, Any]]) -> None:
         self._examples = examples
@@ -44,9 +47,11 @@ class TextSequenceDataset(TorchDataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         example = self._examples[index]
+        input_ids = example["input_ids"]
         return {
-            "index": index,
-            "input_ids": example["input_ids"],
+            "input_ids": input_ids,
+            "labels": list(input_ids),
+            "attention_mask": [1] * len(input_ids),
         }
 
 
@@ -133,30 +138,24 @@ def tokenize_text_rows(
 
 
 def collate_forget(batch: list[dict[str, Any]], pad_id: int) -> dict[str, torch.Tensor]:
-    """Collate function for forget pairs."""
+    """Collate function for forget pairs with labels-based masking."""
     max_len = max(len(row["input_ids"]) for row in batch)
     batch_size = len(batch)
     input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
     attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
-    seed_lens = torch.zeros(batch_size, dtype=torch.long)
-    indices = torch.zeros(batch_size, dtype=torch.long)
-    ref_logps = torch.zeros(batch_size, dtype=torch.float32)
+    labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
 
     for index, row in enumerate(batch):
-        seq = torch.tensor(row["input_ids"], dtype=torch.long)
-        seq_len = seq.numel()
-        input_ids[index, :seq_len] = seq
+        ids = row["input_ids"]
+        seq_len = len(ids)
+        input_ids[index, :seq_len] = torch.tensor(ids, dtype=torch.long)
         attention_mask[index, :seq_len] = 1
-        seed_lens[index] = int(row["seed_len"])
-        indices[index] = int(row["index"])
-        ref_logps[index] = float(row["ref_logp"])
+        labels[index, :seq_len] = torch.tensor(row["labels"], dtype=torch.long)
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
-        "seed_lens": seed_lens,
-        "indices": indices,
-        "ref_logps": ref_logps,
+        "labels": labels,
     }
 
 
@@ -170,19 +169,17 @@ def collate_text_sequences(
     input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
     attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
     labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
-    indices = torch.zeros(batch_size, dtype=torch.long)
 
     for index, row in enumerate(batch):
-        seq = torch.tensor(row["input_ids"], dtype=torch.long)
-        seq_len = seq.numel()
-        input_ids[index, :seq_len] = seq
+        ids = row["input_ids"]
+        seq_len = len(ids)
+        input_ids[index, :seq_len] = torch.tensor(ids, dtype=torch.long)
         attention_mask[index, :seq_len] = 1
-        labels[index, :seq_len] = seq
-        indices[index] = int(row["index"])
+        row_labels = row.get("labels", ids)
+        labels[index, :seq_len] = torch.tensor(row_labels, dtype=torch.long)
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        "indices": indices,
     }
