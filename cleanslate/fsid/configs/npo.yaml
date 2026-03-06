@@ -1,46 +1,9 @@
-# Negative Preference Optimization (NPO) unlearning config.
-#
-# NPO treats the forget set as the "losing" response and minimises:
-#
-#   L = -(2/β) E[ log σ(-β (log π_θ(y|x) - log π_ref(y|x))) ]
-#
-# where log π(y|x) is the FULL-SEQUENCE SUM of per-token log-probs.
-# Reference log-probs are precomputed once from the original (frozen) model
-# before training begins.
-#
-# Usage:
-#   cleanslate fsid train --config cleanslate/fsid/configs/npo.yaml \
-#       -m allenai/OLMo-3-32B \
-#       --forget-path data/fsid/curated/baseline/forget_set.parquet
-#
-# Reference: Zhang et al., "Negative Preference Optimization: How to Make
-#            LLMs Forget", 2024.
-
-# ---------------------------------------------------------------------------
-# Required (set via CLI or override here)
-# ---------------------------------------------------------------------------
 model_name: null        # e.g. allenai/OLMo-3-32B
 forget_path: null       # e.g. data/fsid/curated/baseline/forget_set.parquet
-
-# ---------------------------------------------------------------------------
-# Dataset identity
-# ---------------------------------------------------------------------------
 base_dataset: "allenai/dolma3_mix-6T"
-
-# ---------------------------------------------------------------------------
-# Objective
-# ---------------------------------------------------------------------------
 objective: npo
 train_mode: full        # "full" or "lora"
-
-# ---------------------------------------------------------------------------
-# NPO hyperparameters
-# ---------------------------------------------------------------------------
 npo_beta: 0.1           # β: scales how far π_θ is allowed to drift from π_ref
-
-# ---------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------
 retain_path: null       # Optional; provide to add a CE retain term
 retain_weight: 0.0      # Set > 0 only when retain_path is provided
 forget_text_col: lyrics
@@ -49,10 +12,6 @@ window_size: 50
 stride: 25
 max_windows_per_song: 64
 max_seq_len: 512
-
-# ---------------------------------------------------------------------------
-# Optimization
-# ---------------------------------------------------------------------------
 max_steps: 300
 batch_size: 2
 gradient_accum_steps: 16
@@ -60,25 +19,13 @@ lr: 5.0e-5
 weight_decay: 0.0
 warmup_steps: 20
 max_grad_norm: 1.0
-
-# ---------------------------------------------------------------------------
-# Checkpointing & logging
-# ---------------------------------------------------------------------------
 output_dir: runs
 save_every: 0
 log_every: 10
-
-# ---------------------------------------------------------------------------
-# Validation (optional)
-# ---------------------------------------------------------------------------
 validation_path: null
 validation_text_col: lyrics
 eval_every: 50
 eval_max_samples: 200
-
-# ---------------------------------------------------------------------------
-# Runtime
-# ---------------------------------------------------------------------------
 device: auto
 dtype: bfloat16
 distributed_strategy: single
@@ -87,10 +34,6 @@ fsdp_cpu_offload: false
 seed: 42
 num_workers: 0
 gradient_checkpointing: false
-
-# ---------------------------------------------------------------------------
-# LoRA (used only when train_mode: lora)
-# ---------------------------------------------------------------------------
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05

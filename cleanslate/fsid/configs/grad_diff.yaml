@@ -1,37 +1,8 @@
-# Gradient Difference (GradDiff) unlearning config.
-#
-# GradDiff = Gradient Ascent on forget set + CE (language modelling) on retain set.
-# This is GA with retain_weight > 0.  The retain set is required.
-#
-# Usage:
-#   cleanslate fsid train --config cleanslate/fsid/configs/grad_diff.yaml \
-#       -m allenai/OLMo-3-32B \
-#       --forget-path data/fsid/curated/baseline/forget_set.parquet \
-#       --retain-path data/fsid/curated/baseline/retain_set.parquet
-#
-# Reference: Liu et al., "RETHINKING MACHINE UNLEARNING FOR LARGE LANGUAGE MODELS",
-#            2024 (Section 3.2).
-
-# ---------------------------------------------------------------------------
-# Required (set via CLI or override here)
-# ---------------------------------------------------------------------------
 model_name: null        # e.g. allenai/OLMo-3-32B
 forget_path: null       # e.g. data/fsid/curated/baseline/forget_set.parquet
-
-# ---------------------------------------------------------------------------
-# Dataset identity
-# ---------------------------------------------------------------------------
 base_dataset: "allenai/dolma3_mix-6T"
-
-# ---------------------------------------------------------------------------
-# Objective
-# ---------------------------------------------------------------------------
 objective: grad_diff
 train_mode: full        # "full" or "lora"
-
-# ---------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------
 retain_path: null       # Recommended: provide a retain set for GradDiff
 retain_weight: 1.0      # Weight on retain CE loss; tune together with lr
 forget_text_col: lyrics
@@ -40,10 +11,6 @@ window_size: 50
 stride: 25
 max_windows_per_song: 64
 max_seq_len: 512
-
-# ---------------------------------------------------------------------------
-# Optimization
-# ---------------------------------------------------------------------------
 max_steps: 300
 batch_size: 2
 gradient_accum_steps: 16
@@ -51,25 +18,13 @@ lr: 1.0e-5
 weight_decay: 0.0
 warmup_steps: 20
 max_grad_norm: 1.0
-
-# ---------------------------------------------------------------------------
-# Checkpointing & logging
-# ---------------------------------------------------------------------------
 output_dir: runs
 save_every: 0
 log_every: 10
-
-# ---------------------------------------------------------------------------
-# Validation (optional)
-# ---------------------------------------------------------------------------
 validation_path: null
 validation_text_col: lyrics
 eval_every: 50
 eval_max_samples: 200
-
-# ---------------------------------------------------------------------------
-# Runtime
-# ---------------------------------------------------------------------------
 device: auto
 dtype: bfloat16
 distributed_strategy: single
@@ -78,10 +33,6 @@ fsdp_cpu_offload: false
 seed: 42
 num_workers: 0
 gradient_checkpointing: false
-
-# ---------------------------------------------------------------------------
-# LoRA (used only when train_mode: lora)
-# ---------------------------------------------------------------------------
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05

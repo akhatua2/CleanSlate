@@ -37,21 +37,6 @@ def build_pool(
         "--eval-dataset",
         help="Eval HF dataset ID (e.g. unlearning-cleanslate/eval__OLMo-3-32B__sliding_window__full)",
     ),
-    eval_config: str = typer.Option(
-        "default",
-        "--eval-config",
-        help="Eval dataset config name",
-    ),
-    split: str = typer.Option(
-        "train",
-        "--split",
-        help="Dataset split",
-    ),
-    text_col: str = typer.Option(
-        "reference_target",
-        "--text-col",
-        help="Column containing lyrics text",
-    ),
     fraction_col: str = typer.Option(
         "memorized_fraction",
         "--fraction-col",
@@ -88,34 +73,6 @@ def build_pool(
         "--seed",
         help="Sampling seed",
     ),
-    limit: int | None = typer.Option(
-        None,
-        "--limit",
-        help="Optional max rows to inspect from eval dataset",
-    ),
-    lyrics_dataset: str | None = typer.Option(
-        None,
-        "--lyrics-dataset",
-        help=(
-            "Optional HF dataset ID used as lyrics fallback when text-col is absent "
-            "in the eval dataset"
-        ),
-    ),
-    lyrics_dataset_config: str = typer.Option(
-        "default",
-        "--lyrics-config",
-        help="Config name for the lyrics dataset",
-    ),
-    lyrics_split: str = typer.Option(
-        "train",
-        "--lyrics-split",
-        help="Split for the lyrics dataset",
-    ),
-    lyrics_text_col: str = typer.Option(
-        "reference_target",
-        "--lyrics-text-col",
-        help="Column in the lyrics dataset that contains the song text",
-    ),
     deduplicate: bool = typer.Option(
         True,
         "--deduplicate/--no-deduplicate",
@@ -131,9 +88,6 @@ def build_pool(
     """Build a local stratified candidate pool from an eval dataset."""
     pool_rows, stats = build_candidate_pool(
         eval_dataset=eval_dataset,
-        eval_config=eval_config,
-        split=split,
-        text_col=text_col,
         fraction_col=fraction_col,
         threshold=threshold,
         target_size=target_size,
@@ -141,11 +95,6 @@ def build_pool(
         max_size=max_size,
         num_bins=num_bins,
         seed=seed,
-        limit=limit,
-        lyrics_dataset_id=lyrics_dataset,
-        lyrics_dataset_config=lyrics_dataset_config,
-        lyrics_split=lyrics_split,
-        lyrics_text_col=lyrics_text_col,
         deduplicate=deduplicate,
     )
     output = save_pool_dataset(pool_rows, output_path)
