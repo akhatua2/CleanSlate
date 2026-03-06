@@ -3,8 +3,9 @@
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Iterator
 
+import polars as pl
 from datasets import Dataset, load_dataset
 
 
@@ -21,7 +22,7 @@ class PoolStats:
     mean_fraction: float
 
 
-def _to_artists(value: Any) -> list[str]:
+def _to_artists(value: list | str | None) -> list[str]:
     if value is None:
         return []
     if isinstance(value, list):
@@ -29,27 +30,6 @@ def _to_artists(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
     return [str(value)]
-
-
-def _compute_mem_fraction(row: dict[str, Any], fraction_col: str) -> float:
-    value = row.get(fraction_col)
-    if value is not None:
-        return float(value)
-
-    mem_windows = row.get("memorized_windows")
-    total_windows = row.get("num_windows")
-    if mem_windows is None or total_windows is None:
-        raise KeyError(
-            f"Row missing '{fraction_col}' and fallback columns "
-            f"'memorized_windows'/'num_windows'. "
-            f"Available keys: {sorted(row.keys())}"
-        )
-    if total_windows == 0:
-        raise ValueError(
-            f"num_windows=0 for song_id={row.get('song_id')!r}. "
-            "Cannot compute memorization fraction."
-        )
-    return float(mem_windows) / float(total_windows)
 
 
 def _assign_quantile_bins(values: list[float], num_bins: int) -> list[int]:
@@ -120,12 +100,12 @@ def _allocate_quota(group_sizes: list[int], target_size: int) -> list[int]:
 
 
 def stratified_select(
-    records: list[dict[str, Any]],
+    records: list[dict],
     value_key: str,
     target_size: int,
     num_bins: int,
     seed: int,
-) -> list[dict[str, Any]]:
+) -> list[dict]:
     """Select records by quantile-stratified sampling."""
     if not records:
         return []
@@ -146,7 +126,7 @@ def stratified_select(
         values.append(float(value))
     bins = _assign_quantile_bins(values, num_bins)
 
-    grouped: dict[int, list[dict[str, Any]]] = {}
+    grouped: dict[int, list[dict]] = {}
     for row, bin_id in zip(records, bins):
         row_copy = dict(row)
         row_copy["pool_bin"] = bin_id
@@ -157,7 +137,7 @@ def stratified_select(
     quotas = _allocate_quota(group_sizes, target_size)
 
     rng = random.Random(seed)
-    selected: list[dict[str, Any]] = []
+    selected = []
     for bin_id, quota in zip(ordered_bins, quotas):
         candidates = grouped[bin_id]
         if quota >= len(candidates):
@@ -176,7 +156,7 @@ def stratified_select(
             )
             for record in selected
         }
-        remaining: list[dict[str, Any]] = []
+        remaining = []
         for bin_id in ordered_bins:
             for row in grouped[bin_id]:
                 row_key = (
@@ -192,35 +172,24 @@ def stratified_select(
     return selected
 
 
-def _load_lyrics_lookup(
-    lyrics_dataset_id: str,
-    lyrics_dataset_config: str,
-    lyrics_split: str,
-    lyrics_text_col: str,
-) -> dict[str, str]:
-    ds = load_dataset(lyrics_dataset_id, lyrics_dataset_config, split=lyrics_split)
-    lookup: dict[str, str] = {}
-    for row in ds:
-        song_id = str(row.get("song_id", "") or "")
-        if not song_id:
-            continue
-        text = row.get(lyrics_text_col, "") or ""
-        if isinstance(text, str) and text.strip():
-            lookup[song_id] = text
-    return lookup
+def load_lyrics_dataset():
+    return load_dataset(
+        "unlearning-cleanslate/songs_5000", "default", split="train"
+    ).to_polars(batched=False)
 
 
-def _deduplicate_candidates(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+def _deduplicate_candidates(records: list[dict]) -> list[dict]:
+    by_key: dict[tuple[str, ...], dict] = {}
 
-    def _identity_key(row: dict[str, Any]) -> tuple[str, ...]:
+    def _identity_key(row: dict) -> tuple[str, ...]:
         song_id = str(row.get("song_id", "") or "").strip()
         if song_id:
             return ("song_id", song_id)
 
         title = str(row.get("song_title", "") or "").strip().lower()
         artists = tuple(
-            str(artist).strip().lower() for artist in _to_artists(row.get("song_artists"))
+            str(artist).strip().lower()
+            for artist in _to_artists(row.get("song_artists"))
         )
         year = str(row.get("song_year", "") or "").strip()
         if title or artists or year:
@@ -244,10 +213,7 @@ def _deduplicate_candidates(records: list[dict[str, Any]]) -> list[dict[str, Any
 
 def build_candidate_pool(
     eval_dataset: str,
-    eval_config: str,
     *,
-    split: str = "train",
-    text_col: str = "reference_target",
     fraction_col: str = "memorized_fraction",
     threshold: float = 0.30,
     target_size: int = 100,
@@ -255,13 +221,8 @@ def build_candidate_pool(
     max_size: int = 200,
     num_bins: int = 5,
     seed: int = 42,
-    limit: int | None = None,
-    lyrics_dataset_id: str | None = None,
-    lyrics_dataset_config: str = "default",
-    lyrics_split: str = "train",
-    lyrics_text_col: str = "reference_target",
     deduplicate: bool = True,
-) -> tuple[list[dict[str, Any]], PoolStats]:
+) -> tuple[list[dict], PoolStats]:
     """Build a stratified song pool from an eval dataset."""
     if min_size < 1:
         raise ValueError("min_size must be >= 1")
@@ -276,32 +237,20 @@ def build_candidate_pool(
     if target_size > max_size:
         target_size = max_size
 
-    lyrics_lookup: dict[str, str] = {}
-    if lyrics_dataset_id is not None:
-        lyrics_lookup = _load_lyrics_lookup(
-            lyrics_dataset_id,
-            lyrics_dataset_config,
-            lyrics_split,
-            lyrics_text_col,
-        )
+    lyrics_lookup = load_lyrics_dataset()
+    ds = load_dataset(eval_dataset, "default", split="train")
 
-    ds = load_dataset(eval_dataset, eval_config, split=split)
-
-    eligible: list[dict[str, Any]] = []
+    eligible: list[dict] = []
     total_rows_seen = 0
-    for index, row in enumerate(ds):
-        if limit is not None and index >= limit:
-            break
+    for _, row in enumerate(ds):
         total_rows_seen += 1
 
-        lyrics = row.get(text_col, "") or ""
-        if not isinstance(lyrics, str) or not lyrics.strip():
-            song_id = str(row.get("song_id", "") or "")
-            lyrics = lyrics_lookup.get(song_id, "")
-        if not isinstance(lyrics, str) or len(lyrics.strip()) < 20:
-            continue
+        lyrics = row.get("reference_target", "") or ""
+        if lyrics == "":
+            target_song_id = row["song_id"]
+            lyrics = lyrics_lookup.filter(pl.col("song_id")==target_song_id).select("reference_target")[0].item()
 
-        mem_fraction = _compute_mem_fraction(row, fraction_col)
+        mem_fraction = row.get("memorized_fraction", 0)
         if mem_fraction < threshold:
             continue
 
@@ -317,7 +266,6 @@ def build_candidate_pool(
                 "num_windows": row.get("num_windows"),
                 "memorized_windows": row.get("memorized_windows"),
                 "source_dataset": eval_dataset,
-                "source_config": eval_config,
             }
         )
 
@@ -359,7 +307,7 @@ def build_candidate_pool(
     return selected, stats
 
 
-def save_pool_dataset(records: list[dict[str, Any]], output_path: str | Path) -> Path:
+def save_pool_dataset(records: list[dict], output_path: str | Path) -> Path:
     """Save pool records to local parquet."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

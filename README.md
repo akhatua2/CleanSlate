@@ -200,7 +200,6 @@ Use this when you already have eval datasets and want a local forget-set benchma
 ```bash
 cleanslate fsid build-pool \
   --eval-dataset unlearning-cleanslate/eval__OLMo-3-32B__sliding_window__full \
-  --eval-config default \
   --threshold 0.30 \
   --target-size 100 \
   --min-size 50 \

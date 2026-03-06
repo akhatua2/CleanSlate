@@ -1,37 +1,8 @@
-# Gradient Ascent (GA) unlearning config.
-#
-# Ascends the per-token NLL on the forget set.
-# Use retain_weight > 0 to add a retain CE term (that becomes GradDiff — use
-# grad_diff.yaml instead if you want a retain set).
-#
-# Usage:
-#   cleanslate fsid train --config cleanslate/fsid/configs/ga.yaml \
-#       -m allenai/OLMo-3-32B \
-#       --forget-path data/fsid/curated/baseline/forget_set.parquet
-#
-# Reference: Jang et al., "Knowledge Unlearning for Mitigating Privacy Risks
-#            in Language Models", 2022.
-
-# ---------------------------------------------------------------------------
-# Required (set via CLI or override here)
-# ---------------------------------------------------------------------------
 model_name: null        # e.g. allenai/OLMo-3-32B
 forget_path: null       # e.g. data/fsid/curated/baseline/forget_set.parquet
-
-# ---------------------------------------------------------------------------
-# Dataset identity
-# ---------------------------------------------------------------------------
 base_dataset: "allenai/dolma3_mix-6T"
-
-# ---------------------------------------------------------------------------
-# Objective
-# ---------------------------------------------------------------------------
 objective: ga
 train_mode: full        # "full" or "lora"
-
-# ---------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------
 retain_path: null       # GA does not need a retain set
 retain_weight: 0.0      # 0 = pure gradient ascent on forget set only
 forget_text_col: lyrics
@@ -39,36 +10,20 @@ window_size: 50
 stride: 25
 max_windows_per_song: 64
 max_seq_len: 512
-
-# ---------------------------------------------------------------------------
-# Optimization
-# ---------------------------------------------------------------------------
 max_steps: 300
 batch_size: 2
-gradient_accum_steps: 16   # effective batch = batch_size × gradient_accum_steps
-lr: 1.0e-5                 # GA typically needs a lower lr than NPO/SimNPO
+gradient_accum_steps: 16   
+lr: 1.0e-5
 weight_decay: 0.0
 warmup_steps: 20
 max_grad_norm: 1.0
-
-# ---------------------------------------------------------------------------
-# Checkpointing & logging
-# ---------------------------------------------------------------------------
 output_dir: runs
 save_every: 0              # 0 = only save checkpoint-final
 log_every: 10
-
-# ---------------------------------------------------------------------------
-# Validation (optional — provide a held-out set to monitor utility)
-# ---------------------------------------------------------------------------
 validation_path: null
 validation_text_col: lyrics
 eval_every: 50
 eval_max_samples: 200
-
-# ---------------------------------------------------------------------------
-# Runtime
-# ---------------------------------------------------------------------------
 device: auto
 dtype: bfloat16
 distributed_strategy: single
@@ -77,10 +32,6 @@ fsdp_cpu_offload: false
 seed: 42
 num_workers: 0
 gradient_checkpointing: false
-
-# ---------------------------------------------------------------------------
-# LoRA (used only when train_mode: lora)
-# ---------------------------------------------------------------------------
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05
