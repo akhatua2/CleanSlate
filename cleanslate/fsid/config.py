@@ -33,8 +33,6 @@ class TrainerConfig:
     model_name: str = ""
     forget_path: str = ""
 
-    base_dataset: str = "allenai/dolma3_mix-6T"
-
     retain_path: str | None = None
     output_dir: str = "runs"
 
@@ -93,9 +91,6 @@ class TrainerConfig:
             raise ValueError("model_name is required")
         if not self.forget_path:
             raise ValueError("forget_path is required")
-        if not self.base_dataset:
-            raise ValueError("base_dataset must be a non-empty dataset identifier")
-
         allowed_objectives = get_allowed_objectives()
         if self.objective not in allowed_objectives:
             raise ValueError(

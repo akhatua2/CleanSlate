@@ -474,7 +474,6 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
             "world_size": distributed_context.world_size,
             "rank": distributed_context.rank,
             "is_main_process": distributed_context.is_main_process,
-            "base_dataset": config.base_dataset,
             "num_forget_rows": len(forget_rows),
             "num_forget_pairs": len(forget_pairs),
             "num_retain_rows": len(retain_rows),
