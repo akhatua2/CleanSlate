@@ -44,7 +44,7 @@ from cleanslate.evaluator import (
 )
 from cleanslate.decoding import create_strategy
 from cleanslate.cli_utils import run_parallel_eval, generate_hf_repo_name
-
+from cleanslate.fsid.cli import fsid_app
 
 # Default dataset for memorization evaluation
 DEFAULT_DATASET = "unlearning-cleanslate/cleanslate_dataset"
@@ -89,6 +89,7 @@ app = typer.Typer(
     name="cleanslate",
     help="Sliding window memorization evaluation: compute p_z + generate + compare.",
 )
+app.add_typer(fsid_app, name="fsid")
 console = Console()
 
 

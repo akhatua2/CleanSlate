@@ -190,3 +190,72 @@ print(f'Max p_z: {df.max_p_z.max():.6f}')
 print(df.nlargest(10, 'max_p_z')[['song_title', 'max_p_z', 'coverage']])
 "
 ```
+
+## FSID Workflow (Local Forget/Retain + Local PyTorch Training)
+
+Use this when you already have eval datasets and want a local forget-set benchmark workflow.
+
+### 1) Build a stratified candidate pool from eval outputs
+
+```bash
+cleanslate fsid build-pool \
+  --eval-dataset unlearning-cleanslate/eval__OLMo-3-32B__sliding_window__full \
+  --eval-config default \
+  --threshold 0.30 \
+  --target-size 100 \
+  --min-size 50 \
+  --max-size 200 \
+  --output data/fsid/pool.parquet
+```
+
+This filters songs with `memorized_fraction >= threshold` and samples stratified by memorization fraction.
+
+### 2) Curate baseline forget/retain sets locally
+
+```bash
+cleanslate fsid curate-baseline \
+  --pool-path data/fsid/pool.parquet \
+  --request-count 60 \
+  --output-dir data/fsid/curated/baseline
+```
+
+Baseline policy:
+- `D_forget = {(song, full lyrics)}`
+- `D_retain = ∅`
+
+### 3) Train unlearning model locally in PyTorch
+
+```bash
+cleanslate fsid train \
+  -m "Qwen/Qwen2.5-0.5B-Instruct" \
+  --forget-path data/fsid/curated/baseline/forget_set.parquet \
+  --retain-path data/fsid/curated/baseline/retain_set.parquet \
+  --objective npo \
+  --train-mode full \
+  --max-steps 300 \
+  --batch-size 2 \
+  --grad-accum 16 \
+  --output-dir results/fsid/unlearning/qwen_baseline
+```
+
+This does not call Open-Unlearning subprocesses. Training data is local and no HTTPS fetch happens in the training loop. Single-device training is the default; multi-GPU requires explicit `torchrun` + `--distributed-strategy fsdp`.
+
+### 4) Multi-GPU FSDP training
+
+Use explicit `torchrun` launch when the model does not fit on one GPU:
+
+```bash
+torchrun --nproc_per_node=4 -m cleanslate.cli fsid train \
+  --config cleanslate/fsid/configs/npo.yaml \
+  -m "allenai/OLMo-3-7B" \
+  --forget-path data/fsid/curated/baseline/forget_set.parquet \
+  --distributed-strategy fsdp \
+  --fsdp-sharding-strategy full_shard \
+  --output-dir results/fsid/unlearning/olmo3_npo_fsdp
+```
+
+Constraints:
+- FSDP is explicit only; there is no implicit `device_map="auto"` training path.
+- FSDP currently supports `train_mode=full` only.
+- FSDP currently does not support the RMU objective.
+- Forget, retain, and validation sets must still be materialized locally before training.
