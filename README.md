@@ -199,27 +199,32 @@ Use this when you already have eval datasets and want a local forget-set benchma
 
 ```bash
 cleanslate fsid build-pool \
-  --eval-dataset unlearning-cleanslate/eval__OLMo-3-32B__sliding_window__full \
-  --threshold 0.30 \
-  --target-size 100 \
+  --eval-dataset unlearning-cleanslate/eval__olmo7b-base__sliding_window__all \
+  --threshold 0.10 \
+  --target-size 200 \
+  --forget-fraction 0.30 \
   --min-size 50 \
-  --max-size 200 \
-  --output data/fsid/pool.parquet
+  --max-size 300 \
+  --output-dir data/fsid/olmo7b
 ```
 
-This filters songs with `memorized_fraction >= threshold` and samples stratified by memorization fraction.
+This filters songs with `memorized_fraction >= threshold`, samples a stratified total pool, and then writes:
+- `data/fsid/olmo7b/pool.parquet`: total sampled song pool
+- `data/fsid/olmo7b/forget.parquet`: songs selected for unlearning
+- `data/fsid/olmo7b/retain.parquet`: songs kept out of the forget set
 
 ### 2) Curate baseline forget/retain sets locally
 
 ```bash
-cleanslate fsid curate-baseline \
-  --pool-path data/fsid/pool.parquet \
-  --request-count 60 \
-  --output-dir data/fsid/curated/baseline
+cleanslate fsid curate \
+  --forget-set-rule baseline \
+  --forget-pool-path data/fsid/olmo7b/forget.parquet \
+  --base-dataset allenai/dolma3_mix-6T \
+  --output-dir data/fsid/curated/baseline/olmo7b
 ```
 
 Baseline policy:
-- `D_forget = {(song, full lyrics)}`
+- `D_forget` uses the selected unlearn songs, formats them with the `direct` prompt template and `none` seed mode, and keeps the true lyrics as the target text
 - `D_retain = ∅`
 
 ### 3) Train unlearning model locally in PyTorch

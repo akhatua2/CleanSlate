@@ -14,9 +14,14 @@ from cleanslate.fsid.config import (
     load_config,
 )
 from cleanslate.fsid.datasets.io import load_local_records
-from cleanslate.fsid.datasets.pool import build_candidate_pool, save_pool_dataset
-from cleanslate.fsid.rules.baseline import (
-    curate_baseline_sets,
+from cleanslate.fsid.datasets.pool import (
+    build_candidate_pool,
+    save_pool_datasets,
+    split_pool_records,
+)
+from cleanslate.fsid.rules import (
+    get_forget_set_rule,
+    list_forget_set_rules,
     save_curated_sets,
 )
 from cleanslate.fsid.scoring.benchmark import compute_score, save_score
@@ -28,6 +33,50 @@ fsid_app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def _run_curate(
+    *,
+    forget_set_rule: str,
+    forget_pool_path: str,
+    base_dataset: str | None,
+    seed: int,
+    output_dir: str | None,
+) -> None:
+    try:
+        rule = get_forget_set_rule(forget_set_rule)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--forget-set-rule") from exc
+    forget_song_rows = load_local_records(forget_pool_path)
+    requests, forget_rows, retain_rows = rule.curate(
+        forget_song_rows,
+        base_dataset=base_dataset,
+        seed=seed,
+    )
+    resolved_output_dir = output_dir or str(Path("data/fsid/curated") / rule.name)
+    paths = save_curated_sets(
+        output_dir=resolved_output_dir,
+        requests=requests,
+        forget_rows=forget_rows,
+        retain_rows=retain_rows,
+        metadata={
+            "forget_set_rule": rule.name,
+            "rule_name": rule.artifact_rule_name,
+            "base_dataset": base_dataset,
+            "forget_pool_path": str(Path(forget_pool_path).resolve()),
+            "request_count": len(requests),
+            "seed": seed,
+        },
+    )
+
+    console.print(f"[bold]Rule:[/bold] {rule.name}")
+    console.print(f"[bold]Requests:[/bold] {len(requests)}")
+    console.print(f"[bold]Forget rows:[/bold] {len(forget_rows)}")
+    console.print(f"[bold]Retain rows:[/bold] {len(retain_rows)}")
+    console.print(f"[bold]Saved requests:[/bold] {paths['requests']}")
+    console.print(f"[bold]Saved forget set:[/bold] {paths['forget']}")
+    console.print(f"[bold]Saved retain set:[/bold] {paths['retain']}")
+    console.print(f"[bold]Saved metadata:[/bold] {paths['metadata']}")
 
 
 @fsid_app.command("build-pool")
@@ -78,14 +127,23 @@ def build_pool(
         "--deduplicate/--no-deduplicate",
         help="Deduplicate candidate songs before stratified sampling",
     ),
-    output_path: str = typer.Option(
-        "data/fsid/pool.parquet",
+    forget_fraction: float | None = typer.Option(
+        None,
+        "--forget-fraction",
+        help=(
+            "Fraction of pool songs to mark for unlearning, in (0, 1] "
+            "(default: all pool rows)"
+        ),
+    ),
+    output_root: str = typer.Option(
+        "data/fsid/pool",
+        "--output-dir",
         "--output",
         "-o",
-        help="Local parquet output path for candidate pool",
+        help="Directory or parquet root for pool/forget/retain outputs",
     ),
 ) -> None:
-    """Build a local stratified candidate pool from an eval dataset."""
+    """Build a local stratified candidate pool and split it into forget/retain songs."""
     pool_rows, stats = build_candidate_pool(
         eval_dataset=eval_dataset,
         fraction_col=fraction_col,
@@ -97,83 +155,78 @@ def build_pool(
         seed=seed,
         deduplicate=deduplicate,
     )
-    output = save_pool_dataset(pool_rows, output_path)
+    forget_rows, retain_rows = split_pool_records(
+        pool_rows,
+        forget_fraction=forget_fraction,
+        num_bins=num_bins,
+        seed=seed,
+    )
+    outputs = save_pool_datasets(
+        pool_records=pool_rows,
+        forget_records=forget_rows,
+        retain_records=retain_rows,
+        output_root=output_root,
+    )
 
-    console.print(f"[bold]Saved pool:[/bold] {output}")
+    console.print(f"[bold]Saved pool:[/bold] {outputs['pool']}")
+    console.print(f"[bold]Saved forget songs:[/bold] {outputs['forget']}")
+    console.print(f"[bold]Saved retain songs:[/bold] {outputs['retain']}")
     console.print(f"[bold]Rows scanned:[/bold] {stats.total_rows_seen}")
     console.print(f"[bold]Eligible rows:[/bold] {stats.eligible_rows}")
-    console.print(f"[bold]Selected rows:[/bold] {stats.selected_rows}")
+    console.print(f"[bold]Pool rows:[/bold] {stats.selected_rows}")
+    console.print(f"[bold]Forget rows:[/bold] {len(forget_rows)}")
+    console.print(f"[bold]Retain rows:[/bold] {len(retain_rows)}")
     console.print(
         f"[bold]Mem fraction:[/bold] min={stats.min_fraction:.3f} "
         f"mean={stats.mean_fraction:.3f} max={stats.max_fraction:.3f}"
     )
 
 
-@fsid_app.command("curate-baseline")
-def curate_baseline(
-    pool_path: str = typer.Option(
-        "data/fsid/pool.parquet",
-        "--pool-path",
-        help="Local pool parquet/json/jsonl path",
+@fsid_app.command("curate")
+def curate(
+    forget_set_rule: str = typer.Option(
+        "baseline",
+        "--forget-set-rule",
+        "--rule",
+        help=(
+            "Forget-set construction rule. Allowed: "
+            f"{', '.join(list_forget_set_rules())}"
+        ),
     ),
-    request_count: int | None = typer.Option(
+    forget_pool_path: str = typer.Option(
+        "data/fsid/pool/forget.parquet",
+        "--forget-pool-path",
+        "--pool-path",
+        help="Local forget-song parquet/json/jsonl path from fsid build-pool",
+    ),
+    base_dataset: str | None = typer.Option(
         None,
-        "--request-count",
-        "-n",
-        help="Number of requests to curate (default: all pool rows)",
+        "--base-dataset",
+        help="Base dataset identifier available to forget-set rules.",
     ),
     seed: int = typer.Option(
         42,
         "--seed",
         help="Sampling seed",
     ),
-    num_bins: int = typer.Option(
-        5,
-        "--num-bins",
-        help="Number of memorization strata for request selection",
-    ),
-    output_dir: str = typer.Option(
-        "data/fsid/curated/baseline",
+    output_dir: str | None = typer.Option(
+        None,
         "--output-dir",
         "-o",
-        help="Directory for requests/forget_set/retain_set parquet files",
+        help=(
+            "Directory for requests/forget_set/retain_set parquet files "
+            "(default: data/fsid/curated/<rule>)"
+        ),
     ),
 ) -> None:
-    """
-    Curate baseline forget/retain sets locally.
-
-    Baseline policy:
-      - D_forget = {(song, full lyrics)}
-      - D_retain = empty
-    """
-    pool_rows = load_local_records(pool_path)
-    requests, forget_rows, retain_rows = curate_baseline_sets(
-        pool_rows,
-        request_count=request_count,
+    """Curate forget/retain sets locally using a named forget-set rule."""
+    _run_curate(
+        forget_set_rule=forget_set_rule,
+        forget_pool_path=forget_pool_path,
+        base_dataset=base_dataset,
         seed=seed,
-        num_bins=num_bins,
-    )
-    paths = save_curated_sets(
         output_dir=output_dir,
-        requests=requests,
-        forget_rows=forget_rows,
-        retain_rows=retain_rows,
-        metadata={
-            "rule_name": "baseline_literal",
-            "pool_path": str(Path(pool_path).resolve()),
-            "request_count": len(requests),
-            "seed": seed,
-            "num_bins": num_bins,
-        },
     )
-
-    console.print(f"[bold]Requests:[/bold] {len(requests)}")
-    console.print(f"[bold]Forget rows:[/bold] {len(forget_rows)}")
-    console.print(f"[bold]Retain rows:[/bold] {len(retain_rows)}")
-    console.print(f"[bold]Saved requests:[/bold] {paths['requests']}")
-    console.print(f"[bold]Saved forget set:[/bold] {paths['forget']}")
-    console.print(f"[bold]Saved retain set:[/bold] {paths['retain']}")
-    console.print(f"[bold]Saved metadata:[/bold] {paths['metadata']}")
 
 
 @fsid_app.command("train")
@@ -197,11 +250,6 @@ def train(
         help="Local forget set path, parquet/json/jsonl (required unless --config specifies it)",
     ),
     # Optional overrides
-    base_dataset: str | None = typer.Option(
-        None,
-        "--base-dataset",
-        help="Training corpus the model was trained on (default: allenai/dolma3_mix-6T)",
-    ),
     retain_path: str | None = typer.Option(
         None,
         "--retain-path",
@@ -424,7 +472,6 @@ def train(
     cli_overrides: dict[str, object] = {
         "model_name": model,
         "forget_path": forget_path,
-        "base_dataset": base_dataset,
         "retain_path": retain_path,
         "output_dir": output_dir,
         "objective": objective,
@@ -505,7 +552,7 @@ def score(
     forget_set_path: str = typer.Option(
         ...,
         "--forget-path",
-        help="Local forget_set.parquet from fsid curate-baseline",
+        help="Local forget_set.parquet produced by fsid curate",
     ),
     pre_eval_path: str = typer.Option(
         ...,

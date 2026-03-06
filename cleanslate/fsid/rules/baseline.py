@@ -1,4 +1,4 @@
-"""Baseline local rule: forget the requested song lyrics and retain nothing."""
+"""Baseline local rule: use direct/no-seed lyric prompts and retain nothing."""
 
 import json
 import random
@@ -7,37 +7,45 @@ from typing import Any
 
 from datasets import Dataset
 
-from cleanslate.fsid.datasets.pool import stratified_select
+from cleanslate.prompts import DIRECT
+
+RULE_NAME = "baseline"
+ARTIFACT_RULE_NAME = "baseline_literal"
+
+
+def _build_direct_none_prompt(
+    row: dict[str, Any],
+) -> tuple[str, str, list[dict[str, str]]]:
+    song = {
+        "title": row.get("song_title", ""),
+        "artists": row.get("song_artists", []),
+        "year": row.get("song_year"),
+        "lyrics": row.get("lyrics", ""),
+    }
+    messages = DIRECT.format_messages(song, "")
+    user_prompt = next(
+        (
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") == "user"
+        ),
+        "",
+    )
+    return DIRECT.system_prompt or "", user_prompt, messages
 
 
 def curate_baseline_sets(
-    pool_records: list[dict[str, Any]],
+    unlearn_song_records: list[dict[str, Any]],
     *,
-    request_count: int | None = None,
+    base_dataset: str | None = None,
     seed: int = 42,
-    num_bins: int = 5,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Create baseline request/forget/retain sets from a local candidate pool."""
-    if not pool_records:
-        raise ValueError("Pool is empty.")
-    if request_count is not None and request_count < 1:
-        raise ValueError("request_count must be >= 1 when set.")
-    if num_bins < 1:
-        raise ValueError("num_bins must be >= 1.")
-
-    if request_count is None or request_count >= len(pool_records):
-        selected = [dict(record) for record in pool_records]
-    else:
-        selected = stratified_select(
-            records=[dict(record) for record in pool_records],
-            value_key="memorized_fraction",
-            target_size=request_count,
-            num_bins=num_bins,
-            seed=seed,
-        )
+    """Create baseline request/forget/retain sets from preselected unlearn songs."""
+    if not unlearn_song_records:
+        raise ValueError("Unlearn song list is empty.")
 
     selected = sorted(
-        selected,
+        [dict(record) for record in unlearn_song_records],
         key=lambda row: float(row.get("memorized_fraction", 0.0)),
         reverse=True,
     )
@@ -48,6 +56,8 @@ def curate_baseline_sets(
     for index, row in enumerate(selected):
         song_id = str(row.get("song_id", f"song_{index}"))
         request_id = f"req_{index:04d}_{song_id[:8]}_{rng.randint(1000, 9999)}"
+        system_prompt, user_prompt, messages = _build_direct_none_prompt(row)
+        lyrics = row.get("lyrics", "")
 
         request = {
             "request_id": request_id,
@@ -55,12 +65,19 @@ def curate_baseline_sets(
             "song_title": row.get("song_title", ""),
             "song_artists": row.get("song_artists", []),
             "song_year": row.get("song_year"),
-            "lyrics": row.get("lyrics", ""),
+            "lyrics": lyrics,
+            "target": lyrics,
             "memorized_fraction": row.get("memorized_fraction"),
             "max_p_z": row.get("max_p_z"),
             "source_dataset": row.get("source_dataset"),
             "source_config": row.get("source_config"),
-            "curation_rule": "baseline_literal",
+            "prompt_template": DIRECT.name,
+            "seed_mode": "none",
+            "lyrics_hint": "",
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "messages": messages,
+            "curation_rule": ARTIFACT_RULE_NAME,
         }
         requests.append(request)
 
@@ -71,8 +88,15 @@ def curate_baseline_sets(
                 "song_title": request["song_title"],
                 "song_artists": request["song_artists"],
                 "song_year": request["song_year"],
-                "lyrics": request["lyrics"],
-                "rule_name": "baseline_literal",
+                "lyrics": lyrics,
+                "target": lyrics,
+                "prompt_template": DIRECT.name,
+                "seed_mode": "none",
+                "lyrics_hint": "",
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "messages": messages,
+                "rule_name": ARTIFACT_RULE_NAME,
             }
         )
 
@@ -111,6 +135,13 @@ def save_curated_sets(
                 "song_artists": [],
                 "song_year": [],
                 "lyrics": [],
+                "target": [],
+                "prompt_template": [],
+                "seed_mode": [],
+                "lyrics_hint": [],
+                "system_prompt": [],
+                "user_prompt": [],
+                "messages": [],
                 "rule_name": [],
             }
         ).to_parquet(str(retain_path))

@@ -1,6 +1,5 @@
 model_name: null        # e.g. allenai/OLMo-3-32B
 forget_path: null       # e.g. data/fsid/curated/baseline/forget_set.parquet
-base_dataset: "allenai/dolma3_mix-6T"
 objective: npo
 train_mode: full        # "full" or "lora"
 npo_beta: 0.1           # β: scales how far π_θ is allowed to drift from π_ref

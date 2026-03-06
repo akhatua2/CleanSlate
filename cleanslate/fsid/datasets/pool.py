@@ -1,9 +1,10 @@
 """Candidate pool construction for forget-set identification experiments."""
 
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any
 
 import polars as pl
 from datasets import Dataset, load_dataset
@@ -178,25 +179,25 @@ def load_lyrics_dataset():
     ).to_polars(batched=False)
 
 
+def _identity_key(row: dict[str, Any]) -> tuple[str, ...]:
+    song_id = str(row.get("song_id", "") or "").strip()
+    if song_id:
+        return ("song_id", song_id)
+
+    title = str(row.get("song_title", "") or "").strip().lower()
+    artists = tuple(
+        str(artist).strip().lower() for artist in _to_artists(row.get("song_artists"))
+    )
+    year = str(row.get("song_year", "") or "").strip()
+    if title or artists or year:
+        return ("meta", title, "|".join(artists), year)
+
+    lyrics = str(row.get("lyrics", "") or "")
+    return ("lyrics_prefix", lyrics[:128])
+
+
 def _deduplicate_candidates(records: list[dict]) -> list[dict]:
     by_key: dict[tuple[str, ...], dict] = {}
-
-    def _identity_key(row: dict) -> tuple[str, ...]:
-        song_id = str(row.get("song_id", "") or "").strip()
-        if song_id:
-            return ("song_id", song_id)
-
-        title = str(row.get("song_title", "") or "").strip().lower()
-        artists = tuple(
-            str(artist).strip().lower()
-            for artist in _to_artists(row.get("song_artists"))
-        )
-        year = str(row.get("song_year", "") or "").strip()
-        if title or artists or year:
-            return ("meta", title, "|".join(artists), year)
-
-        lyrics = str(row.get("lyrics", "") or "")
-        return ("lyrics_prefix", lyrics[:128])
 
     for row in records:
         key = _identity_key(row)
@@ -307,9 +308,103 @@ def build_candidate_pool(
     return selected, stats
 
 
+def split_pool_records(
+    records: list[dict[str, Any]],
+    *,
+    forget_fraction: float | None = None,
+    num_bins: int = 5,
+    seed: int = 42,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a total pool into selected forget songs and the remaining retain songs."""
+    if not records:
+        raise ValueError("Pool is empty.")
+    if forget_fraction is not None and not 0.0 < forget_fraction <= 1.0:
+        raise ValueError("forget_fraction must be in (0, 1] when set.")
+    if num_bins < 1:
+        raise ValueError("num_bins must be >= 1.")
+
+    copied = [dict(record) for record in records]
+    if forget_fraction is None:
+        forget_target_size = len(copied)
+    else:
+        forget_target_size = max(1, math.ceil(len(copied) * forget_fraction))
+
+    if forget_target_size >= len(copied):
+        forget_rows = copied
+    else:
+        forget_rows = stratified_select(
+            records=copied,
+            value_key="memorized_fraction",
+            target_size=forget_target_size,
+            num_bins=num_bins,
+            seed=seed,
+        )
+
+    forget_rows = sorted(
+        forget_rows,
+        key=lambda row: float(row.get("memorized_fraction", 0.0)),
+        reverse=True,
+    )
+    forget_keys = {_identity_key(row) for row in forget_rows}
+    retain_rows = [
+        dict(row) for row in copied if _identity_key(row) not in forget_keys
+    ]
+    retain_rows = sorted(
+        retain_rows,
+        key=lambda row: float(row.get("memorized_fraction", 0.0)),
+        reverse=True,
+    )
+    return forget_rows, retain_rows
+
+
+def _empty_dataset(columns: list[str], output_path: Path) -> None:
+    Dataset.from_dict({column: [] for column in columns}).to_parquet(str(output_path))
+
+
 def save_pool_dataset(records: list[dict], output_path: str | Path) -> Path:
     """Save pool records to local parquet."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Dataset.from_list(records).to_parquet(str(output_path))
     return output_path
+
+
+def _resolve_split_output_paths(output_root: str | Path) -> dict[str, Path]:
+    path = Path(output_root)
+    if path.suffix.lower() == ".parquet":
+        stem = path.stem
+        return {
+            "pool": path,
+            "forget": path.with_name(f"{stem}_forget.parquet"),
+            "retain": path.with_name(f"{stem}_retain.parquet"),
+        }
+    return {
+        "pool": path / "pool.parquet",
+        "forget": path / "forget.parquet",
+        "retain": path / "retain.parquet",
+    }
+
+
+def save_pool_datasets(
+    *,
+    pool_records: list[dict[str, Any]],
+    forget_records: list[dict[str, Any]],
+    retain_records: list[dict[str, Any]],
+    output_root: str | Path,
+) -> dict[str, Path]:
+    """Save the total pool and its forget/retain song splits to local parquet."""
+    if not pool_records:
+        raise ValueError("pool_records must be non-empty.")
+
+    paths = _resolve_split_output_paths(output_root)
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    save_pool_dataset(pool_records, paths["pool"])
+    save_pool_dataset(forget_records, paths["forget"])
+    if retain_records:
+        save_pool_dataset(retain_records, paths["retain"])
+    else:
+        _empty_dataset(list(pool_records[0].keys()), paths["retain"])
+
+    return paths

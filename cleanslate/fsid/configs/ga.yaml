@@ -1,6 +1,5 @@
 model_name: null        # e.g. allenai/OLMo-3-32B
 forget_path: null       # e.g. data/fsid/curated/baseline/forget_set.parquet
-base_dataset: "allenai/dolma3_mix-6T"
 objective: ga
 train_mode: full        # "full" or "lora"
 retain_path: null       # GA does not need a retain set
