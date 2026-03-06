@@ -1,6 +1,7 @@
 """Configuration types for local FSID unlearning runs."""
 
 from dataclasses import dataclass, fields as dataclass_fields
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,8 +21,8 @@ ALLOWED_FSDP_SHARDING_STRATEGIES: tuple[str, ...] = (
 
 
 def get_allowed_objectives() -> list[str]:
-    """Return the runtime objective list from the registry."""
-    from cleanslate.fsid.training.objectives import list_objectives
+    """Return the runtime objective list."""
+    from cleanslate.fsid.training.trainer import list_objectives
 
     return list_objectives()
 
@@ -175,6 +176,58 @@ class TrainerConfig:
                 raise ValueError("FSDP currently only supports train_mode='full'")
             if self.device in ("cpu", "mps"):
                 raise ValueError("FSDP requires CUDA devices")
+
+    def to_training_arguments(self) -> Any:
+        """Convert to HF TrainingArguments."""
+        from transformers import TrainingArguments
+
+        model_short = self.model_name.split("/")[-1]
+        run_name = (
+            f"{self.objective}_{model_short}_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        output_dir = str(Path(self.output_dir) / run_name)
+
+        fsdp_value = ""
+        fsdp_config: dict[str, Any] | None = None
+        if self.distributed_strategy == "fsdp":
+            fsdp_value = self.fsdp_sharding_strategy
+            fsdp_config = {
+                "cpu_offload": self.fsdp_cpu_offload,
+            }
+
+        do_eval = self.validation_path is not None
+
+        return TrainingArguments(
+            output_dir=output_dir,
+            per_device_train_batch_size=self.batch_size,
+            gradient_accumulation_steps=self.gradient_accum_steps,
+            learning_rate=self.lr,
+            weight_decay=self.weight_decay,
+            warmup_steps=self.warmup_steps,
+            max_steps=self.max_steps,
+            max_grad_norm=self.max_grad_norm,
+            logging_steps=self.log_every,
+            save_steps=self.save_every if self.save_every > 0 else self.max_steps,
+            save_strategy="steps" if self.save_every > 0 else "no",
+            eval_steps=self.eval_every if do_eval else None,
+            eval_strategy="steps" if do_eval else "no",
+            seed=self.seed,
+            bf16=(self.dtype == "bfloat16"),
+            fp16=(self.dtype == "float16"),
+            gradient_checkpointing=self.gradient_checkpointing,
+            fsdp=fsdp_value,
+            fsdp_config=fsdp_config,
+            dataloader_num_workers=self.num_workers,
+            remove_unused_columns=False,
+            run_name=run_name,
+            logging_first_step=True,
+            report_to="none",
+            lr_scheduler_type="linear",
+            save_total_limit=2,
+            load_best_model_at_end=False,
+            disable_tqdm=False,
+        )
 
 
 def load_config(
