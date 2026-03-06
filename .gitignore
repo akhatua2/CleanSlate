@@ -16,6 +16,7 @@ venv/
 .claude/
 
 results/
+runs/
 data/
 outputs/
 book_paper.txt

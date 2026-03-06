@@ -14,6 +14,7 @@ dependencies = [
     "python-dotenv",
     "pip3-autoremove>=2.0.1",
     "datasets>=4.5.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +22,7 @@ vllm = ["vllm"]
 sglang = ["sglang"]
 cli = ["typer", "rich"]
 export = ["pyarrow", "datasets"]
+unlearning = ["peft>=0.11.0"]
 
 [project.scripts]
 cleanslate = "cleanslate.cli:main"
