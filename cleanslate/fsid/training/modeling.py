@@ -12,8 +12,8 @@ from cleanslate.fsid.datasets.unlearning import ForgetPairDataset, collate_forge
 from cleanslate.fsid.training.distributed import (
     DistributedContext,
     gather_indexed_scalars,
-    partition_dataset,
 )
+from torch.utils.data.distributed import DistributedSampler
 from cleanslate.fsid.training.objectives.utils import (
     conditional_avg_log_probs,
     conditional_sum_log_probs,
@@ -56,8 +56,16 @@ def get_input_device(model: Any) -> str:
     return str(next(model.parameters()).device)
 
 
-def load_tokenizer(model_name: str) -> Any:
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+def load_tokenizer(
+    model_name: str,
+    *,
+    local_files_only: bool = False,
+) -> Any:
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        local_files_only=local_files_only,
+    )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
@@ -92,6 +100,9 @@ def load_train_model(
     config: TrainerConfig,
     device: str,
     torch_dtype: torch.dtype,
+    *,
+    local_files_only: bool = False,
+    move_to_device: bool = True,
 ) -> Any:
     """Load the single-device train model."""
     model = AutoModelForCausalLM.from_pretrained(
@@ -99,9 +110,18 @@ def load_train_model(
         torch_dtype=torch_dtype,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
+        local_files_only=local_files_only,
     )
+    # Some model configs (e.g. OLMo) store rope_scaling fields as ints
+    # but transformers validates them as floats.  Patch in-place.
+    rope_cfg = getattr(getattr(model, "config", None), "rope_scaling", None)
+    if isinstance(rope_cfg, dict):
+        for key in ("beta_slow", "beta_fast", "factor"):
+            if key in rope_cfg and isinstance(rope_cfg[key], int):
+                rope_cfg[key] = float(rope_cfg[key])
     model = apply_lora_if_requested(model, config)
-    model.to(device)
+    if move_to_device:
+        model.to(device)
 
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
         model.config.use_cache = False
@@ -135,11 +155,24 @@ def precompute_reference_logps(
             device=input_device,
         )
 
-    local_dataset = partition_dataset(dataset, distributed_context)
+    # Use DistributedSampler instead of partition_dataset so that every rank
+    # iterates the same number of batches.  With FSDP the forward pass itself
+    # is a collective (all-gather for parameters), so if one rank exits the
+    # loop early the remaining ranks deadlock waiting for it.
+    sampler: DistributedSampler | None = None
+    if distributed_context.is_distributed:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=distributed_context.world_size,
+            rank=distributed_context.rank,
+            shuffle=False,
+            drop_last=False,
+        )
     loader = DataLoader(
-        local_dataset,
+        dataset,
         batch_size=batch_size,
         shuffle=False,
+        sampler=sampler,
         num_workers=num_workers,
         collate_fn=lambda batch: collate_forget(batch, pad_id),
         pin_memory=input_device.startswith("cuda"),
