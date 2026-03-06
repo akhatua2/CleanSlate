@@ -242,24 +242,33 @@ cleanslate fsid train \
   --output-dir results/fsid/unlearning/qwen_baseline
 ```
 
-This does not call Open-Unlearning subprocesses. Training data is local and no HTTPS fetch happens in the training loop. Single-device training is the default; multi-GPU requires explicit `torchrun` + `--distributed-strategy fsdp`.
+This does not call Open-Unlearning subprocesses. Training data is local and no HTTPS fetch happens in the training loop. Single-device training is the default; multi-GPU requires `accelerate launch` or `torchrun` with `--distributed-strategy fsdp`.
 
-### 4) Multi-GPU FSDP training
+### 4) Multi-GPU FSDP2 training
 
-Use explicit `torchrun` launch when the model does not fit on one GPU:
+Training uses HuggingFace Accelerate with FSDP2 when the model does not fit on one GPU:
 
 ```bash
-torchrun --nproc_per_node=4 -m cleanslate.cli fsid train \
+accelerate launch --num_processes 10 -m cleanslate fsid train \
   --config cleanslate/fsid/configs/npo.yaml \
-  -m "allenai/OLMo-3-7B" \
-  --forget-path data/fsid/curated/baseline/forget_set.parquet \
+  -m "allenai/Olmo-3-1025-7B" \
+  --forget-path data/fsid/curated/baseline/olmo7b/forget_set.parquet \
+  --objective npo \
   --distributed-strategy fsdp \
   --fsdp-sharding-strategy full_shard \
-  --output-dir results/fsid/unlearning/olmo3_npo_fsdp
+  --gradient-checkpointing \
+  --output-dir results/fsid/unlearning/olmo3_npo_fsdp \
+  --max-steps 400 \
+  --batch-size 1 \
+  --grad-accum 2
 ```
+
+`--gradient-checkpointing` is essential for 7B+ models on 16 GB GPUs — without it, activations for all decoder layers are held simultaneously and will OOM. Use `--batch-size 1` per GPU and compensate with `--grad-accum` for the desired effective batch size (here: 1 * 10 GPUs * 16 accum = 160).
+
+`torchrun --nproc_per_node=10` also works as a launcher (Accelerate detects the torchrun environment automatically).
 
 Constraints:
 - FSDP is explicit only; there is no implicit `device_map="auto"` training path.
-- FSDP currently supports `train_mode=full` only.
+- FSDP currently supports `train_mode=full` only (no LoRA + FSDP).
 - FSDP currently does not support the RMU objective.
 - Forget, retain, and validation sets must still be materialized locally before training.
