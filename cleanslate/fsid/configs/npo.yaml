@@ -11,7 +11,7 @@ window_size: 50
 stride: 25
 max_windows_per_song: 64
 max_seq_len: 512
-max_steps: 300
+num_epochs: 5
 batch_size: 2
 gradient_accum_steps: 16
 lr: 5.0e-5

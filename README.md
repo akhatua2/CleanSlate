@@ -258,7 +258,7 @@ accelerate launch --num_processes 10 -m cleanslate fsid train \
   --fsdp-sharding-strategy full_shard \
   --gradient-checkpointing \
   --output-dir results/fsid/unlearning/olmo3_npo_fsdp \
-  --max-steps 400 \
+  --epochs 2 \
   --batch-size 1 \
   --grad-accum 2
 ```

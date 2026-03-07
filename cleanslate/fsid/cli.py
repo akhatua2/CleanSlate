@@ -286,10 +286,10 @@ def train(
         "--max-windows-per-song",
         help="Cap forget training windows per song",
     ),
-    max_steps: int | None = typer.Option(
+    num_epochs: int | None = typer.Option(
         None,
-        "--max-steps",
-        help="Number of optimizer steps",
+        "--epochs",
+        help="Number of training epochs over the forget set",
     ),
     batch_size: int | None = typer.Option(
         None,
@@ -479,7 +479,7 @@ def train(
         "window_size": window_size,
         "stride": stride,
         "max_windows_per_song": max_windows_per_song,
-        "max_steps": max_steps,
+        "num_epochs": num_epochs,
         "batch_size": batch_size,
         "gradient_accum_steps": gradient_accum_steps,
         "lr": lr,

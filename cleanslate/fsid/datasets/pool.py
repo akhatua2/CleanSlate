@@ -257,8 +257,8 @@ def build_candidate_pool(
 
         eligible.append(
             {
-                "song_id": row.get("song_id", ""),
-                "song_title": row.get("song_title", ""),
+                "song_id": row.get("song_id") or row.get("content_id") or "",
+                "song_title": row.get("song_title") or row.get("content_title") or "",
                 "song_artists": _to_artists(row.get("song_artists")),
                 "song_year": row.get("song_year"),
                 "lyrics": lyrics,
