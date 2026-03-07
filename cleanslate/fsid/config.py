@@ -49,7 +49,7 @@ class TrainerConfig:
     max_forget_pairs: int | None = None
     max_retain_records: int | None = None
 
-    max_steps: int = 300
+    num_epochs: int = 5
     batch_size: int = 2
     gradient_accum_steps: int = 16
     lr: float = 5e-5
@@ -86,6 +86,14 @@ class TrainerConfig:
         "q_proj,k_proj,v_proj,o_proj,up_proj,down_proj,gate_proj"
     )
 
+    def make_run_name(self) -> str:
+        """Build the default timestamped run name."""
+        model_short = self.model_name.split("/")[-1]
+        return (
+            f"{self.objective}_{model_short}_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+
     def validate(self) -> None:
         """Validate constraints. Raises ValueError on any violation."""
         if not self.model_name:
@@ -118,8 +126,8 @@ class TrainerConfig:
                 f"Unsupported fsdp_sharding_strategy '{self.fsdp_sharding_strategy}'. "
                 f"Allowed: {list(ALLOWED_FSDP_SHARDING_STRATEGIES)}"
             )
-        if self.max_steps < 1:
-            raise ValueError("max_steps must be >= 1")
+        if self.num_epochs < 1:
+            raise ValueError("num_epochs must be >= 1")
         if self.batch_size < 1:
             raise ValueError("batch_size must be >= 1")
         if self.gradient_accum_steps < 1:
@@ -177,24 +185,28 @@ class TrainerConfig:
             if self.device in ("cpu", "mps"):
                 raise ValueError("FSDP requires CUDA devices")
 
-    def to_training_arguments(self) -> Any:
+    def to_training_arguments(self, *, run_name: str | None = None) -> Any:
         """Convert to HF TrainingArguments."""
         from transformers import TrainingArguments
 
-        model_short = self.model_name.split("/")[-1]
-        run_name = (
-            f"{self.objective}_{model_short}_"
-            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
+        run_name = run_name or self.make_run_name()
         output_dir = str(Path(self.output_dir) / run_name)
 
         fsdp_value = ""
         fsdp_config: dict[str, Any] | None = None
+        use_gradient_checkpointing = self.gradient_checkpointing
         if self.distributed_strategy == "fsdp":
-            fsdp_value = self.fsdp_sharding_strategy
+            fsdp_value = f"{self.fsdp_sharding_strategy} auto_wrap"
             fsdp_config = {
+                "auto_wrap_policy": "TRANSFORMER_BASED_WRAP",
                 "cpu_offload": self.fsdp_cpu_offload,
             }
+            # With FSDP, use FSDP's activation checkpointing instead of
+            # HF Trainer's gradient_checkpointing to avoid shape mismatches
+            # during checkpoint recomputation.
+            if self.gradient_checkpointing:
+                fsdp_config["activation_checkpointing"] = True
+                use_gradient_checkpointing = False
 
         do_eval = self.validation_path is not None
 
@@ -205,17 +217,17 @@ class TrainerConfig:
             learning_rate=self.lr,
             weight_decay=self.weight_decay,
             warmup_steps=self.warmup_steps,
-            max_steps=self.max_steps,
+            num_train_epochs=self.num_epochs,
             max_grad_norm=self.max_grad_norm,
             logging_steps=self.log_every,
-            save_steps=self.save_every if self.save_every > 0 else self.max_steps,
+            save_steps=self.save_every if self.save_every > 0 else 999999,
             save_strategy="steps" if self.save_every > 0 else "no",
             eval_steps=self.eval_every if do_eval else None,
             eval_strategy="steps" if do_eval else "no",
             seed=self.seed,
             bf16=(self.dtype == "bfloat16"),
             fp16=(self.dtype == "float16"),
-            gradient_checkpointing=self.gradient_checkpointing,
+            gradient_checkpointing=use_gradient_checkpointing,
             fsdp=fsdp_value,
             fsdp_config=fsdp_config,
             dataloader_num_workers=self.num_workers,

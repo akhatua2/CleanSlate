@@ -84,6 +84,11 @@ def copy_metadata(item: dict[str, Any], target: dict[str, Any]) -> None:
     for col in METADATA_COLUMNS:
         if col in item:
             target[col] = item[col]
+    # Emit song_id/song_title aliases so FSID scorer can match by either name
+    if "content_id" in item and "song_id" not in target:
+        target["song_id"] = item["content_id"]
+    if "content_title" in item and "song_title" not in target:
+        target["song_title"] = item["content_title"]
 
 app = typer.Typer(
     name="cleanslate",

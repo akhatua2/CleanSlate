@@ -1,16 +1,16 @@
 """FSID unlearning trainer using HF Trainer with open-unlearning patterns."""
 
-import copy
 import json
 import logging
 import time
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import torch
+from accelerate.logging import get_logger
 from transformers import Trainer
+import yaml
 
 from cleanslate.fsid.config import TrainerConfig
 from cleanslate.fsid.datasets.io import load_local_records
@@ -27,9 +27,27 @@ from cleanslate.fsid.training.losses import (
 )
 from cleanslate.fsid.training.modeling import load_model, load_tokenizer
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__, log_level="INFO")
 
 ALLOWED_OBJECTIVES = ["ga", "grad_diff", "npo", "simnpo"]
+
+
+def _save_resolved_config(config: TrainerConfig, run_name: str, run_dir: Path) -> None:
+    config_snapshot = asdict(config)
+    config_snapshot["_run_name"] = run_name
+    config_snapshot["_run_dir"] = str(run_dir)
+    with open(run_dir / "config.yaml", "w") as f:
+        yaml.safe_dump(config_snapshot, f, default_flow_style=False, sort_keys=False)
+
+
+def _setup_file_logging(log_path: Path) -> logging.FileHandler:
+    """Add a FileHandler to the module logger. Returns the handler for cleanup."""
+    fh = logging.FileHandler(log_path, mode="a")
+    fh.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logging.getLogger(__name__).addHandler(fh)
+    return fh
 
 
 def list_objectives() -> list[str]:
@@ -59,10 +77,29 @@ class CleanSlateUnlearnTrainer(Trainer):
         self.simnpo_gamma = simnpo_gamma
         self.retain_weight = retain_weight
 
+    def floating_point_ops(self, inputs: dict[str, Any]) -> int:
+        """Estimate FLOPs from nested forget/retain inputs."""
+        total_tokens = 0
+        for key in ("forget", "retain"):
+            sub = inputs.get(key)
+            if sub is not None and "input_ids" in sub:
+                total_tokens += sub["input_ids"].numel()
+        # ~6 FLOPs per token per parameter (forward + backward)
+        num_params = sum(p.numel() for p in self.model.parameters())
+        return 6 * total_tokens * num_params
+
     @staticmethod
-    def prepare_ref_model(model: Any, accelerator: Any) -> Any:
-        """Create a frozen reference model following open-unlearning's pattern."""
-        ref_model = copy.deepcopy(model)
+    def prepare_ref_model(
+        config: TrainerConfig, accelerator: Any
+    ) -> Any:
+        """Load a separate frozen reference model from disk.
+
+        Avoids deepcopy which materializes all FSDP shards on every rank,
+        doubling peak memory.  Loading from disk lets each rank stay lean
+        until FSDP re-shards the new model.
+        """
+        ref_model = load_model(config)
+        ref_model.to(accelerator.device)
         for param in ref_model.parameters():
             param.requires_grad = False
         ref_model = accelerator.prepare_model(ref_model, evaluation_mode=True)
@@ -144,6 +181,11 @@ class CleanSlateUnlearnTrainer(Trainer):
 def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
     """Entry point for unlearning training. Replaces the manual training loop."""
     config.validate()
+
+    run_name = config.make_run_name()
+    training_args = config.to_training_arguments(run_name=run_name)
+    run_dir = Path(training_args.output_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Tokenizer ---
     tokenizer = load_tokenizer(config.model_name)
@@ -232,9 +274,6 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         )
         model = get_peft_model(model, lora_cfg)
 
-    # --- Training Arguments ---
-    training_args = config.to_training_arguments()
-
     # --- Collators ---
     train_collator = UnlearnDataCollator(pad_token_id=pad_id)
 
@@ -260,6 +299,21 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         processing_class=tokenizer,
     )
 
+    # File logging + config snapshot (main process only)
+    file_handler: logging.FileHandler | None = None
+    if trainer.is_world_process_zero():
+        file_handler = _setup_file_logging(run_dir / "train.log")
+        _save_resolved_config(config, run_name, run_dir)
+        logger.info(
+            "Starting FSID train: model=%s objective=%s train_mode=%s "
+            "strategy=%s run_dir=%s",
+            config.model_name,
+            config.objective,
+            config.train_mode,
+            config.distributed_strategy,
+            run_dir,
+        )
+
     # Override eval collator (Trainer uses data_collator for eval too by default)
     if eval_collator is not None:
         trainer._eval_collator = eval_collator
@@ -268,30 +322,34 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
     if config.objective == "npo":
         logger.info("Creating frozen reference model for NPO")
         trainer.ref_model = CleanSlateUnlearnTrainer.prepare_ref_model(
-            model, trainer.accelerator
+            config, trainer.accelerator
         )
 
     # --- Train ---
     run_start = time.time()
     logger.info(
-        "Starting training: objective=%s train_mode=%s max_steps=%d",
+        "Starting training: objective=%s train_mode=%s epochs=%d",
         config.objective,
         config.train_mode,
-        config.max_steps,
+        config.num_epochs,
     )
     trainer.train()
     run_seconds = time.time() - run_start
 
     # --- Save ---
+    trainer.accelerator.wait_for_everyone()
     trainer.save_model()
-    tokenizer.save_pretrained(training_args.output_dir)
-    logger.info("Saved checkpoint to %s", training_args.output_dir)
+    trainer.accelerator.wait_for_everyone()
+    if trainer.is_world_process_zero():
+        tokenizer.save_pretrained(training_args.output_dir)
+        logger.info("Saved checkpoint to %s", training_args.output_dir)
 
     # --- Summary ---
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     num_total = sum(p.numel() for p in model.parameters())
 
     summary: dict[str, Any] = {
+        "run_name": run_name,
         "run_dir": training_args.output_dir,
         "config": asdict(config),
         "num_forget_rows": len(forget_rows),
@@ -309,5 +367,10 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         with open(Path(training_args.output_dir) / "train_summary.json", "w") as f:
             json.dump(summary, f, indent=2)
         logger.info("Training complete (%.1fs)", run_seconds)
+
+    # Clean up file handler
+    if file_handler is not None:
+        logging.getLogger(__name__).removeHandler(file_handler)
+        file_handler.close()
 
     return summary

@@ -8,6 +8,17 @@ from typing import Any
 from cleanslate.fsid.datasets.io import load_local_records
 
 
+def _resolve_song_id(row: dict[str, Any]) -> str | None:
+    raw = row.get("song_id") or row.get("content_id")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return str(raw)
+
+
+def _resolve_song_title(row: dict[str, Any]) -> str:
+    return str(row.get("song_title") or row.get("content_title") or "")
+
+
 @dataclass
 class SongDelta:
     """Per-song change in memorization after unlearning."""
@@ -55,18 +66,17 @@ def _index_unique_by_song_id(
     duplicates: set[str] = set()
     missing = 0
     for row in records:
-        song_id_raw = row.get("song_id")
-        if song_id_raw is None or str(song_id_raw).strip() == "":
+        song_id = _resolve_song_id(row)
+        if song_id is None:
             missing += 1
             continue
-        song_id = str(song_id_raw)
         if song_id in indexed:
             duplicates.add(song_id)
             continue
         indexed[song_id] = row
 
     if missing:
-        raise ValueError(f"{label} contains {missing} row(s) without song_id")
+        raise ValueError(f"{label} contains {missing} row(s) without song_id/content_id")
     if duplicates:
         sample = sorted(duplicates)[:5]
         raise ValueError(
@@ -142,7 +152,7 @@ def compute_score(
         deltas.append(
             SongDelta(
                 song_id=song_id,
-                song_title=str(pre.get("song_title") or ""),
+                song_title=_resolve_song_title(pre),
                 pre_memorized_fraction=pre_frac,
                 post_memorized_fraction=post_frac,
                 delta_memorized_fraction=pre_frac - post_frac,
