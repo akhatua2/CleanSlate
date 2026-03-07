@@ -22,6 +22,7 @@ from cleanslate.fsid.datasets.unlearning import (
 )
 from cleanslate.fsid.training.data import ForgetRetainDataset, UnlearnDataCollator
 from cleanslate.fsid.training.losses import (
+    compute_kl_retain_loss,
     compute_npo_loss,
     compute_simnpo_loss,
 )
@@ -67,7 +68,9 @@ class CleanSlateUnlearnTrainer(Trainer):
         ref_model: Any | None = None,
         npo_beta: float = 0.1,
         simnpo_gamma: float = 0.1,
+        forget_weight: float = 1.0,
         retain_weight: float = 1.0,
+        retain_loss_type: str = "nll",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -75,7 +78,9 @@ class CleanSlateUnlearnTrainer(Trainer):
         self.ref_model = ref_model
         self.npo_beta = npo_beta
         self.simnpo_gamma = simnpo_gamma
+        self.forget_weight = forget_weight
         self.retain_weight = retain_weight
+        self.retain_loss_type = retain_loss_type
 
     def floating_point_ops(self, inputs: dict[str, Any]) -> int:
         """Estimate FLOPs from nested forget/retain inputs."""
@@ -136,17 +141,23 @@ class CleanSlateUnlearnTrainer(Trainer):
         else:
             raise ValueError(f"Unknown objective: {self.objective}")
 
-        # Retain loss (standard CE)
+        # Retain loss (NLL or KL divergence)
         retain_loss = torch.tensor(0.0, device=f_ids.device)
         if retain_inputs is not None and self.retain_weight > 0:
-            r_out = model(
-                input_ids=retain_inputs["input_ids"],
-                attention_mask=retain_inputs["attention_mask"],
-                labels=retain_inputs["labels"],
-            )
-            retain_loss = r_out.loss
+            r_ids = retain_inputs["input_ids"]
+            r_mask = retain_inputs["attention_mask"]
+            r_labels = retain_inputs["labels"]
+            if self.retain_loss_type == "kl" and self.ref_model is not None:
+                retain_loss = compute_kl_retain_loss(
+                    model, self.ref_model, r_ids, r_mask, r_labels
+                )
+            else:
+                r_out = model(
+                    input_ids=r_ids, attention_mask=r_mask, labels=r_labels
+                )
+                retain_loss = r_out.loss
 
-        total_loss = forget_loss + self.retain_weight * retain_loss
+        total_loss = self.forget_weight * forget_loss + self.retain_weight * retain_loss
 
         if self.state.global_step % max(self.args.logging_steps, 1) == 0:
             self._log_losses(forget_loss, retain_loss)
@@ -290,7 +301,9 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         objective=config.objective,
         npo_beta=config.npo_beta,
         simnpo_gamma=config.simnpo_gamma,
+        forget_weight=config.forget_weight,
         retain_weight=config.retain_weight,
+        retain_loss_type=config.retain_loss_type,
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -318,9 +331,10 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
     if eval_collator is not None:
         trainer._eval_collator = eval_collator
 
-    # Create frozen ref model for NPO (after trainer.model is prepared by accelerator)
-    if config.objective == "npo":
-        logger.info("Creating frozen reference model for NPO")
+    # Create frozen ref model for NPO or KL retain loss
+    needs_ref = config.objective == "npo" or config.retain_loss_type == "kl"
+    if needs_ref:
+        logger.info("Creating frozen reference model for %s", config.objective)
         trainer.ref_model = CleanSlateUnlearnTrainer.prepare_ref_model(
             config, trainer.accelerator
         )

@@ -10,6 +10,7 @@ ObjectiveType = Literal["ga", "grad_diff", "npo", "simnpo"]
 TrainModeType = Literal["full", "lora"]
 DistributedStrategyType = Literal["single", "fsdp"]
 FSDPShardingStrategyType = Literal["full_shard", "shard_grad_op"]
+RetainLossType = Literal["nll", "kl"]
 
 ALLOWED_TRAIN_MODES: tuple[str, ...] = ("full", "lora")
 ALLOWED_DTYPES: tuple[str, ...] = ("bfloat16", "float16", "float32")
@@ -18,6 +19,7 @@ ALLOWED_FSDP_SHARDING_STRATEGIES: tuple[str, ...] = (
     "full_shard",
     "shard_grad_op",
 )
+ALLOWED_RETAIN_LOSS_TYPES: tuple[str, ...] = ("nll", "kl")
 
 
 def get_allowed_objectives() -> list[str]:
@@ -56,7 +58,9 @@ class TrainerConfig:
     weight_decay: float = 0.0
     warmup_steps: int = 20
     max_grad_norm: float = 1.0
+    forget_weight: float = 1.0
     retain_weight: float = 1.0
+    retain_loss_type: RetainLossType = "nll"
 
     npo_beta: float = 0.1
     simnpo_gamma: float = 0.1
@@ -152,8 +156,15 @@ class TrainerConfig:
             raise ValueError("lr must be > 0")
         if self.npo_beta <= 0:
             raise ValueError("npo_beta must be > 0")
+        if self.forget_weight < 0:
+            raise ValueError("forget_weight must be >= 0")
         if self.retain_weight < 0:
             raise ValueError("retain_weight must be >= 0")
+        if self.retain_loss_type not in ALLOWED_RETAIN_LOSS_TYPES:
+            raise ValueError(
+                f"Unsupported retain_loss_type '{self.retain_loss_type}'. "
+                f"Allowed: {list(ALLOWED_RETAIN_LOSS_TYPES)}"
+            )
         if self.warmup_steps < 0:
             raise ValueError("warmup_steps must be >= 0")
         if self.log_every < 1:

@@ -29,7 +29,9 @@ class WindowDelta:
     delta_p_z: float  # pre - post (positive = less memorized)
     pre_is_memorized: bool
     post_is_memorized: bool
-    transition: str  # "forgotten" | "retained_memorized" | "retained_clean" | "regressed"
+    transition: (
+        str  # "forgotten" | "retained_memorized" | "retained_clean" | "regressed"
+    )
 
 
 @dataclass
@@ -79,6 +81,10 @@ class UnlearningScore:
     retain_total_windows: int | None = None
     retain_windows_regressed: int | None = None
     retain_window_stability: float | None = None
+
+    # Optional validation benchmark deltas (populated when --pre-validation / --post-validation provided)
+    validation_deltas: list[dict[str, Any]] | None = None
+    utility_retained: float | None = None  # avg(post_acc/pre_acc) across benchmarks
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -146,7 +152,14 @@ def _compute_window_deltas(
             )
         )
 
-    return (len(common_idxs), forgotten, retained_memorized, retained_clean, regressed, deltas)
+    return (
+        len(common_idxs),
+        forgotten,
+        retained_memorized,
+        retained_clean,
+        regressed,
+        deltas,
+    )
 
 
 def _index_unique_by_song_id(
@@ -168,7 +181,9 @@ def _index_unique_by_song_id(
         indexed[song_id] = row
 
     if missing:
-        raise ValueError(f"{label} contains {missing} row(s) without song_id/content_id")
+        raise ValueError(
+            f"{label} contains {missing} row(s) without song_id/content_id"
+        )
     if duplicates:
         sample = sorted(duplicates)[:5]
         raise ValueError(
@@ -240,9 +255,7 @@ def compute_score(
         pre_pz = float(pre_pz_raw)
         post_pz = float(post_pz_raw)
 
-        window_result = _compute_window_deltas(
-            pre.get("windows"), post.get("windows")
-        )
+        window_result = _compute_window_deltas(pre.get("windows"), post.get("windows"))
         window_kwargs: dict[str, Any] = {}
         if window_result is not None:
             n_win, w_forg, w_ret_mem, w_ret_clean, w_reg, w_deltas = window_result
@@ -313,10 +326,14 @@ def compute_score(
     if has_forget_windows:
         f_total = sum(d.num_windows for d in forget_deltas if d.num_windows is not None)
         f_forgotten = sum(
-            d.windows_forgotten for d in forget_deltas if d.windows_forgotten is not None
+            d.windows_forgotten
+            for d in forget_deltas
+            if d.windows_forgotten is not None
         )
         f_regressed = sum(
-            d.windows_regressed for d in forget_deltas if d.windows_regressed is not None
+            d.windows_regressed
+            for d in forget_deltas
+            if d.windows_regressed is not None
         )
         f_retained_mem = sum(
             d.windows_retained_memorized
@@ -334,7 +351,9 @@ def compute_score(
     if has_retain_windows:
         r_total = sum(d.num_windows for d in retain_deltas if d.num_windows is not None)
         r_regressed = sum(
-            d.windows_regressed for d in retain_deltas if d.windows_regressed is not None
+            d.windows_regressed
+            for d in retain_deltas
+            if d.windows_regressed is not None
         )
         window_agg_kwargs["retain_total_windows"] = r_total
         window_agg_kwargs["retain_windows_regressed"] = r_regressed
