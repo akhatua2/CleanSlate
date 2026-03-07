@@ -564,11 +564,6 @@ def score(
         "--post-eval",
         help="Local eval results parquet AFTER unlearning (run cleanslate eval on checkpoint)",
     ),
-    retain_weight: float = typer.Option(
-        1.0,
-        "--retain-weight",
-        help="Weight for retain penalty in combined score",
-    ),
     output_path: str = typer.Option(
         "results/fsid/score.json",
         "--output",
@@ -587,7 +582,6 @@ def score(
         forget_set_path=forget_set_path,
         pre_eval_path=pre_eval_path,
         post_eval_path=post_eval_path,
-        retain_weight=retain_weight,
     )
     out = save_score(result, output_path)
 
@@ -597,16 +591,23 @@ def score(
     console.print(f"  Fraction improved:      {result.forget_fraction_improved:.1%}")
     console.print(f"  Mean Δ memorized_frac:  {result.forget_mean_delta_frac:+.4f}  (positive = less memorized)")
     console.print(f"  Mean Δ max_p_z:         {result.forget_mean_delta_pz:+.6f}")
+    if result.forget_total_windows is not None:
+        console.print(f"  Total windows:          {result.forget_total_windows}")
+        console.print(f"  Windows forgotten:      {result.forget_windows_forgotten}  (memorized -> clean)")
+        console.print(f"  Windows regressed:      {result.forget_windows_regressed}  (clean -> memorized)")
+        console.print(f"  Window forget rate:     {result.forget_window_forget_rate:.1%}")
     console.print()
     console.print("[bold]Retain set[/bold]")
     console.print(f"  Songs scored:           {result.retain_count}")
     console.print(f"  Mean |Δ| memorized_frac:{result.retain_mean_abs_delta_frac:.4f}  (lower = better)")
     console.print(f"  Mean |Δ| max_p_z:       {result.retain_mean_abs_delta_pz:.6f}")
+    if result.retain_total_windows is not None:
+        console.print(f"  Total windows:          {result.retain_total_windows}")
+        console.print(f"  Windows regressed:      {result.retain_windows_regressed}  (clean -> memorized)")
+        console.print(f"  Window stability:       {result.retain_window_stability:.1%}")
     console.print()
     console.print("[bold]Score[/bold]")
     console.print(f"  Forget score:    [green]{result.forget_score:.4f}[/green]")
     console.print(f"  Retain penalty:  [yellow]{result.retain_penalty:.4f}[/yellow]")
-    console.print(f"  Combined score:  [bold]{result.combined_score:.4f}[/bold]  "
-                  f"(forget - {retain_weight}×retain_penalty)")
     console.print()
     console.print(f"[bold]Saved to:[/bold] {out}")
