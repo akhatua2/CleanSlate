@@ -1,8 +1,9 @@
 """Loss utilities for FSID unlearning, ported from open-unlearning patterns."""
 
+from typing import Any
+
 import torch
 import torch.nn.functional as F
-from typing import Any
 
 
 def compute_batch_nll(
@@ -102,4 +103,41 @@ def compute_simnpo_loss(
     loss = -(2.0 / beta) * F.logsigmoid(
         -beta * avg_log_probs - gamma
     ).mean()
+    return loss
+
+
+def compute_kl_retain_loss(
+    model: Any,
+    ref_model: Any,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    labels: torch.Tensor,
+) -> torch.Tensor:
+    """KL divergence retain loss: KL(ref || model) on non-masked tokens.
+
+    Matches open-unlearning's retain_loss_type=KL: trains the model to
+    preserve the reference model's output distribution on retain data.
+    """
+    with torch.no_grad():
+        ref_outputs = ref_model(input_ids=input_ids, attention_mask=attention_mask)
+    ref_logits = ref_outputs.logits[:, :-1, :].float()
+
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    model_logits = outputs.logits[:, :-1, :].float()
+
+    target = labels[:, 1:]
+    mask = (target != -100).float()
+
+    # KL(ref || model) per token, then mask and average
+    ref_probs = F.softmax(ref_logits, dim=-1)
+    model_log_probs = F.log_softmax(model_logits, dim=-1)
+
+    # per-token KL: sum over vocab dimension
+    per_token_kl = F.kl_div(
+        model_log_probs, ref_probs, reduction="none", log_target=False
+    ).sum(dim=-1)
+
+    # mask out padding/ignored positions and average
+    num_tokens = mask.sum().clamp(min=1)
+    loss = (per_token_kl * mask).sum() / num_tokens
     return loss

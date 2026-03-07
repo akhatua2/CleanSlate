@@ -315,3 +315,41 @@ The scorer computes:
 These appear in the CLI output and JSON report. If the `windows` column is absent, scoring falls back to song-level metrics only.
 
 Input files (`--pre-eval` and `--post-eval`) must each have columns `song_id` (or `content_id`), `memorized_fraction`, and `max_p_z`, and must cover the exact same set of songs. Every song in `--forget-path` must appear in the eval universe.
+
+### 6) Validate utility retention
+
+Run standard NLP benchmarks before and after unlearning to measure utility retention. Uses [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) with the SGLang backend — any of its 300+ tasks are available.
+
+```bash
+pip install -e ".[eval]"
+
+# Pre-unlearning baseline
+cleanslate fsid validate \
+  -m allenai/OLMo-3-32B \
+  -B mmlu,gsm8k \
+  -o results/fsid/pre_val.json
+
+# Post-unlearning (on checkpoint)
+cleanslate fsid validate \
+  -m results/fsid/unlearning/olmo3_npo_fsdp/<run_name> \
+  -B mmlu,gsm8k \
+  -o results/fsid/post_val.json
+
+# Include in scoring
+cleanslate fsid score \
+  --forget-path data/fsid/curated/baseline/olmo7b/forget_set.parquet \
+  --pre-eval  results/pre_eval/direct__first_line/results.parquet \
+  --post-eval results/fsid/post_eval/direct__first_line/results.parquet \
+  --pre-validation results/fsid/pre_val.json \
+  --post-validation results/fsid/post_val.json \
+  -o results/fsid/score.json
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-B`, `--benchmarks` | `mmlu,gsm8k` | Comma-separated lm-eval task names (e.g. `arc_easy`, `hellaswag`, `winogrande`) |
+| `-n`, `--limit` | None | Limit items per task (for quick testing) |
+| `--num-fewshot` | None | Override default few-shot count |
+| `--batch-size` | `auto` | Batch size (`auto` or integer) |
+| `--tp-size` | 1 | Tensor parallel size for multi-GPU |
+| `--mem-fraction` | 0.85 | GPU memory fraction for SGLang engine |

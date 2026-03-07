@@ -8,6 +8,7 @@ from rich.console import Console
 from cleanslate.fsid.config import (
     ALLOWED_DISTRIBUTED_STRATEGIES,
     ALLOWED_FSDP_SHARDING_STRATEGIES,
+    ALLOWED_RETAIN_LOSS_TYPES,
     ALLOWED_TRAIN_MODES,
     TrainerConfig,
     get_allowed_objectives,
@@ -26,6 +27,12 @@ from cleanslate.fsid.rules import (
 )
 from cleanslate.fsid.scoring.benchmark import compute_score, save_score
 from cleanslate.fsid.training.trainer import train_unlearning
+from cleanslate.fsid.validation import run_validation
+from cleanslate.fsid.validation.results import (
+    compare_validations,
+    load_validation,
+    save_validation,
+)
 
 fsid_app = typer.Typer(
     name="fsid",
@@ -331,10 +338,20 @@ def train(
         "--simnpo-gamma",
         help="SimNPO margin parameter",
     ),
+    forget_weight: float | None = typer.Option(
+        None,
+        "--forget-weight",
+        help="Forget objective weight (scales forget loss term)",
+    ),
     retain_weight: float | None = typer.Option(
         None,
         "--retain-weight",
         help="Retain objective weight",
+    ),
+    retain_loss_type: str | None = typer.Option(
+        None,
+        "--retain-loss-type",
+        help=f"Retain loss type: {', '.join(ALLOWED_RETAIN_LOSS_TYPES)}",
     ),
     max_seq_len: int | None = typer.Option(
         None,
@@ -359,10 +376,7 @@ def train(
     fsdp_sharding_strategy: str | None = typer.Option(
         None,
         "--fsdp-sharding-strategy",
-        help=(
-            "FSDP sharding strategy: "
-            f"{', '.join(ALLOWED_FSDP_SHARDING_STRATEGIES)}"
-        ),
+        help=(f"FSDP sharding strategy: {', '.join(ALLOWED_FSDP_SHARDING_STRATEGIES)}"),
     ),
     fsdp_cpu_offload: bool | None = typer.Option(
         None,
@@ -488,7 +502,9 @@ def train(
         "max_grad_norm": max_grad_norm,
         "npo_beta": npo_beta,
         "simnpo_gamma": simnpo_gamma,
+        "forget_weight": forget_weight,
         "retain_weight": retain_weight,
+        "retain_loss_type": retain_loss_type,
         "max_seq_len": max_seq_len,
         "device": device,
         "dtype": dtype,
@@ -547,6 +563,102 @@ def train(
         console.print(f"[bold]Val sequences:[/bold] {summary['num_val_sequences']}")
 
 
+@fsid_app.command("validate")
+def validate(
+    model: str = typer.Option(
+        ...,
+        "-m",
+        "--model",
+        help="Model name or checkpoint path",
+    ),
+    benchmarks: str = typer.Option(
+        "mmlu,gsm8k",
+        "-B",
+        "--benchmarks",
+        help="Comma-separated lm-eval task names (e.g. mmlu,gsm8k,arc_easy,hellaswag)",
+    ),
+    output: str = typer.Option(
+        "results/fsid/validation.json",
+        "-o",
+        "--output",
+        help="Output JSON path",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "-n",
+        "--limit",
+        help="Limit items per task (for quick testing)",
+    ),
+    num_fewshot: int | None = typer.Option(
+        None,
+        "--num-fewshot",
+        help="Override default number of few-shot examples",
+    ),
+    batch_size: str = typer.Option(
+        "auto",
+        "--batch-size",
+        help="Batch size for evaluation ('auto' or integer)",
+    ),
+    mem_fraction: float = typer.Option(
+        0.85,
+        "--mem-fraction",
+        help="GPU memory fraction for SGLang engine",
+    ),
+    tp_size: int = typer.Option(
+        1,
+        "--tp-size",
+        help="Tensor parallel size for multi-GPU",
+    ),
+    seed: int = typer.Option(
+        42,
+        "--seed",
+        help="Random seed",
+    ),
+) -> None:
+    """Run validation benchmarks on a model using lm-evaluation-harness."""
+    task_names = [b.strip() for b in benchmarks.split(",") if b.strip()]
+
+    # Parse batch_size: allow "auto" or integer string
+    bs: int | str
+    try:
+        bs = int(batch_size)
+    except ValueError:
+        bs = batch_size
+
+    console.print(f"[bold]Model:[/bold] {model}")
+    console.print(f"[bold]Tasks:[/bold] {', '.join(task_names)}")
+    if limit is not None:
+        console.print(f"[bold]Limit:[/bold] {limit} items per task")
+
+    results = run_validation(
+        model_name=model,
+        tasks=task_names,
+        limit=limit,
+        num_fewshot=num_fewshot,
+        batch_size=bs,
+        mem_fraction=mem_fraction,
+        tp_size=tp_size,
+    )
+
+    out = save_validation(results, output, model_name=model)
+
+    console.print()
+    for name, result in results.items():
+        console.print(f"[bold]{name.upper()}[/bold]")
+        console.print(f"  Accuracy: {result.accuracy:.1%}")
+        console.print(f"  Time: {result.eval_time_seconds:.1f}s")
+        if result.per_subset:
+            top_subjects = sorted(
+                result.per_subset.values(), key=lambda s: s.accuracy, reverse=True
+            )[:5]
+            console.print(
+                f"  Top subjects: {', '.join(s.name + f' ({s.accuracy:.0%})' for s in top_subjects)}"
+            )
+        console.print()
+
+    console.print(f"[bold]Saved to:[/bold] {out}")
+
+
 @fsid_app.command("score")
 def score(
     forget_set_path: str = typer.Option(
@@ -564,6 +676,16 @@ def score(
         "--post-eval",
         help="Local eval results parquet AFTER unlearning (run cleanslate eval on checkpoint)",
     ),
+    pre_validation_path: str | None = typer.Option(
+        None,
+        "--pre-validation",
+        help="Pre-unlearning validation JSON (from fsid validate)",
+    ),
+    post_validation_path: str | None = typer.Option(
+        None,
+        "--post-validation",
+        help="Post-unlearning validation JSON (from fsid validate)",
+    ),
     output_path: str = typer.Option(
         "results/fsid/score.json",
         "--output",
@@ -577,6 +699,8 @@ def score(
     Forget score: fraction of forget-set songs with reduced memorization (higher is better).
     Retain penalty: normalized change in memorization for non-forget songs (lower is better).
     Combined score: forget_score - retain_weight * retain_penalty.
+
+    Optionally include --pre-validation and --post-validation to measure utility retention.
     """
     result = compute_score(
         forget_set_path=forget_set_path,
@@ -589,25 +713,57 @@ def score(
     console.print("[bold]Forget set[/bold]")
     console.print(f"  Songs scored:           {result.forget_count}")
     console.print(f"  Fraction improved:      {result.forget_fraction_improved:.1%}")
-    console.print(f"  Mean Δ memorized_frac:  {result.forget_mean_delta_frac:+.4f}  (positive = less memorized)")
+    console.print(
+        f"  Mean Δ memorized_frac:  {result.forget_mean_delta_frac:+.4f}  (positive = less memorized)"
+    )
     console.print(f"  Mean Δ max_p_z:         {result.forget_mean_delta_pz:+.6f}")
     if result.forget_total_windows is not None:
         console.print(f"  Total windows:          {result.forget_total_windows}")
-        console.print(f"  Windows forgotten:      {result.forget_windows_forgotten}  (memorized -> clean)")
-        console.print(f"  Windows regressed:      {result.forget_windows_regressed}  (clean -> memorized)")
-        console.print(f"  Window forget rate:     {result.forget_window_forget_rate:.1%}")
+        console.print(
+            f"  Windows forgotten:      {result.forget_windows_forgotten}  (memorized -> clean)"
+        )
+        console.print(
+            f"  Windows regressed:      {result.forget_windows_regressed}  (clean -> memorized)"
+        )
+        console.print(
+            f"  Window forget rate:     {result.forget_window_forget_rate:.1%}"
+        )
     console.print()
     console.print("[bold]Retain set[/bold]")
     console.print(f"  Songs scored:           {result.retain_count}")
-    console.print(f"  Mean |Δ| memorized_frac:{result.retain_mean_abs_delta_frac:.4f}  (lower = better)")
+    console.print(
+        f"  Mean |Δ| memorized_frac:{result.retain_mean_abs_delta_frac:.4f}  (lower = better)"
+    )
     console.print(f"  Mean |Δ| max_p_z:       {result.retain_mean_abs_delta_pz:.6f}")
     if result.retain_total_windows is not None:
         console.print(f"  Total windows:          {result.retain_total_windows}")
-        console.print(f"  Windows regressed:      {result.retain_windows_regressed}  (clean -> memorized)")
+        console.print(
+            f"  Windows regressed:      {result.retain_windows_regressed}  (clean -> memorized)"
+        )
         console.print(f"  Window stability:       {result.retain_window_stability:.1%}")
     console.print()
     console.print("[bold]Score[/bold]")
     console.print(f"  Forget score:    [green]{result.forget_score:.4f}[/green]")
     console.print(f"  Retain penalty:  [yellow]{result.retain_penalty:.4f}[/yellow]")
+
+    # Validation comparison
+    if pre_validation_path and post_validation_path:
+        pre_val = load_validation(pre_validation_path)
+        post_val = load_validation(post_validation_path)
+        deltas = compare_validations(pre_val, post_val)
+        if deltas:
+            console.print()
+            console.print("[bold]Validation[/bold]")
+            for d in deltas:
+                console.print(
+                    f"  {d.benchmark_name.upper():8s}"
+                    f"  pre={d.pre_accuracy:.1%}"
+                    f"  post={d.post_accuracy:.1%}"
+                    f"  Δ={d.delta_accuracy:+.1%}"
+                    f"  ({d.relative_retention:.1%} retained)"
+                )
+            avg_retention = sum(d.relative_retention for d in deltas) / len(deltas)
+            console.print(f"  Utility retained: {avg_retention:.1%}")
+
     console.print()
     console.print(f"[bold]Saved to:[/bold] {out}")
