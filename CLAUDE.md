@@ -1,213 +1,219 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
 
 ## Overview
 
-CleanSlate is a Python library for **sequence likelihood estimation** - measuring how likely an LLM is to generate specific text given a prompt/seed. It supports two operational modes:
+CleanSlate is a **sliding window memorization evaluation and unlearning framework** for LLMs. It measures whether a model has memorized specific text by computing extraction probability (p_z) across overlapping windows, and provides a full FSID (Forget Set IDentification) pipeline for unlearning memorized content.
 
-1. **Standard Mode**: Computes metrics (perplexity, rank-1 fraction, avg rank) on seed/target pairs
-2. **Generation Mode**: Generates multiple outputs per seed and saves raw data (tokens, logprobs, alternatives) for later analysis
+Based on:
+- Cooper et al. "Extracting memorized pieces of copyrighted books"
+- Hayes et al. "Measuring memorization in language models"
+
+Two main workflows:
+1. **Memorization Evaluation** — Slide a window across text, compute p_z = P(suffix | prefix) via teacher forcing, optionally generate and compare with BLEU/ROUGE
+2. **FSID Unlearning** — Build forget/retain sets from eval results, train unlearning objectives (GA, NPO, SimNPO, GradDiff), score effectiveness, validate utility retention
 
 ## Development Commands
 
 ### Setup
 ```bash
-# Install in editable mode with all dependencies
 pip install -e ".[cli,export]"
 
-# Upgrade dependencies
-pip install --upgrade -e ".[cli,export]"
+# For unlearning (adds peft/LoRA):
+pip install -e ".[cli,export,unlearning]"
+
+# For validation benchmarks (adds lm-eval):
+pip install -e ".[cli,export,eval]"
 ```
 
-### Running Experiments
+### Primary CLI
 
-**Standard mode (compute metrics immediately):**
 ```bash
-# Via CLI
-cleanslate run -m "Qwen/Qwen2.5-0.5B-Instruct" -d shakespeare -o results.json
+# Sliding window memorization evaluation (main command)
+cleanslate eval \
+  -d unlearning-cleanslate/cleanslate_dataset \
+  -c default \
+  -m "Qwen/Qwen3-8B" \
+  --window-size 50 --stride 25 \
+  -n 100
 
-# Via Python
-python run_trial.py
-
-# Single seed/target pair
-cleanslate probe "To be or not to be" ", that is the question" -m "Qwen/Qwen2.5-0.5B-Instruct"
-```
-
-**Generation mode (save raw data):**
-```bash
-# Via CLI
-cleanslate generate -m "Qwen/Qwen2.5-0.5B-Instruct" -d shakespeare -n 3 -o generations.parquet
-
-# Via Python - see examples in GENERATION_MODE.md
+# FSID unlearning workflow
+cleanslate fsid build-pool --eval-dataset <hf_dataset> --threshold 0.10
+cleanslate fsid curate --forget-set-rule baseline --forget-pool-path data/fsid/pool/forget.parquet
+cleanslate fsid train -m <model> --forget-path <path> --objective npo
+cleanslate fsid score --forget-path <path> --pre-eval <path> --post-eval <path>
+cleanslate fsid validate -m <model> -B mmlu,gsm8k
 ```
 
 ### Code Quality
-
-The project uses:
-- **Ruff** for linting (configured in `pyproject.toml`)
-- **mypy** with strict mode for type checking
-
 ```bash
-# Type check
-mypy cleanslate
-
-# Lint
-ruff check cleanslate
-
-# Format (Ruff also handles formatting)
-ruff format cleanslate
+mypy cleanslate          # Type check (strict mode)
+ruff check cleanslate    # Lint
+ruff format cleanslate   # Format
 ```
 
 ## Architecture
 
-### Core Components
+### Core: MemorizationEvaluator (`cleanslate/evaluator.py`)
 
-**`Experiment` class** (`cleanslate/experiment.py:14`)
-- Main harness for running likelihood experiments
-- Lazy-loads inference backend on first use
-- Methods: `run()` for batch experiments, `run_single()` for single pair, `compare_targets()` for comparing alternatives
-- Backend selection: "huggingface" (recommended), "vllm", or "sglang"
+Primary interface, exported from `cleanslate/__init__.py`.
 
-**`InferenceBackend` abstract class** (`cleanslate/backends/base.py:39`)
-- All backends inherit from this
-- Key method: `compute(seed, target) -> ProbabilityResult`
-- Returns: log probability, perplexity, token-level metrics, token ranks
+- **`MemorizationConfig`** (dataclass, line 35): `window_prefix_len`, `window_suffix_len`, `window_stride`, `tau_min` (0.1% default), `do_generate`, `decode_strategy` ("greedy"/"beam"), `beam_width`, `reproduction_threshold`
+- **`MemorizationResult`** (dataclass, line 72): Per-window result with `p_z`, `log_prob`, `perplexity`, `is_memorized`, `bleu_1`, `rouge_l`, `is_reproduced`, beam search outputs
+- **`SlidingWindowResult`** (dataclass, line 160): Aggregate across windows — `max_p_z`, `mean_p_z`, `memorized_windows`, `coverage`, `char_to_max_pz` heatmap data
+- **`ExperimentSummary`** (dataclass, line 214): Batch experiment statistics
+- **`MemorizationEvaluator`** (class, line 253): `__init__(model, backend, config)`, methods: `evaluate_single(seed, target)`, `sliding_window(text, name)`, `save_results()`
+- **`save_results()`** (function): Saves results to Parquet + optional HF Hub push
 
-**`ProbabilityResult` dataclass** (`cleanslate/backends/base.py:8`)
-- Stores computation results
-- Key properties: `log_prob`, `perplexity`, `rank_1_fraction`, `avg_rank`, `avg_log_prob`
-- Per-token data: `token_log_probs`, `token_ranks`
+### Legacy: Experiment & GenerationExperiment
 
-**Results Storage**
-- `SampleResult` (`cleanslate/results.py:9`): Single (seed, target) result
-- `ExperimentResults` (`cleanslate/results.py:33`): Collection with aggregate stats, computed on init
+- **`Experiment`** (`experiment.py:19`): Legacy batch likelihood computation. Methods: `run()`, `run_single()`, `compare_targets()`
+- **`GenerationExperiment`** (`generation.py`): Batch generation with double-buffered I/O. `GenerationRow` dataclass for flat Parquet output
 
-### Backend Structure
+### Backends (`cleanslate/backends/`)
 
-All backends in `cleanslate/backends/`:
-- **HuggingFace** (`huggingface.py`) - **RECOMMENDED**: Simple, memory-efficient, GPU-accelerated. Uses `device_map="auto"` for multi-GPU support. Both `compute()` and `generate()` fully implemented.
-- **SGLang** (`sglang_backend.py`) - GPU-optimized backend with memory-efficient serving. Both `compute()` and `generate()` fully implemented. Captures token logprobs and top-k alternatives per position. Requires: `pip install cleanslate[sglang]` (builds from source).
-- **vLLM** (`vllm_backend.py`) - Basic implementation; not recommended due to API changes (v0.15.0+) and memory overhead (see `BACKEND_RECOMMENDATIONS.md`)
+Factory: `create_backend(name, model_name, device=..., **kwargs)` in `__init__.py`
 
-### Data Flow
+| Backend | File | Best For |
+|---------|------|----------|
+| **SGLang** (default for eval) | `sglang_backend.py` | GPU batched inference, supports `dp_size` for multi-GPU |
+| **HuggingFace** | `huggingface.py` | Simple setup, CPU/GPU, `device_map="auto"` |
+| **vLLM** | `vllm_backend.py` | Not recommended (API instability) |
 
-1. User provides `seed` (prefix) and `target` (continuation)
-2. Backend tokenizes `seed + target`, gets logits from forward pass
-3. Extracts log probabilities for target tokens only
-4. Computes: total log-prob (sum), perplexity (exp(-avg)), ranks (position in top-k)
-5. Returns `ProbabilityResult` with all metrics and per-token data
+Base classes in `base.py`:
+- `InferenceBackend` (ABC): `compute(seed, target) -> ProbabilityResult`, `generate(seed, strategy, ...) -> DecodingOutput`
+- `ProbabilityResult` (dataclass, line 49): `log_prob`, `perplexity`, `token_log_probs`, `token_ranks`
+- `GenerationResult` (dataclass, line 14): `generated_text`, `token_log_probs`, `top_k_tokens`
+- `SongGenerationOutput` (Pydantic model, line 6): Structured output for song generation
 
-### Generation Mode
+### Decoding Strategies (`cleanslate/decoding/`)
 
-**Generation System** (`cleanslate/generation.py`)
-- `GenerationRow`: Dataclass for flat Parquet/HuggingFace Datasets output (one row = one generation)
-- Generates N outputs per seed using backend's `generate()` method
-- Saves to Parquet (fast columnar format) or HuggingFace Datasets
-- Captures full token sequence, logprobs, top-k alternatives per position
-- Each backend (HuggingFace, SGLang) implements token-level probability capture
+- `DecodingStrategy` (ABC in `base.py`): Base class
+- `GreedyDecoding` (`greedy.py`): Always pick highest probability token
+- `BeamSearchDecoding` (`beam.py`): Maintain top-k hypotheses with `beam_width` and `length_penalty`
+- Factory: `create_strategy(name, **kwargs)` in `__init__.py`
+- `DecodingOutput`: Contains list of `GenerationSequence` (one per beam)
 
-### Evaluation Metrics
+### Metrics (`cleanslate/metrics/`)
 
-**Metrics Module** (`cleanslate/metrics/`)
-- `Metric` abstract base class for evaluation metrics
-- **N-gram metrics**: BLEU (BLEU1, BLEU2), ROUGE (ROUGE1, ROUGE2, ROUGEL) for sequence similarity
-- **Probability metrics** (`probability.py`): Hayes et al. extraction probability framework
-  - `compute_extraction_probability()`: Compute probability of extracting target text
-  - `prompts_for_probability()`: Generate prompts for probability estimation
-  - `probability_after_n_prompts()`: Estimate extraction probability with N prompts
-- All metrics return `MetricResult` with score and metadata
+- `Metric` (ABC in `base.py`): `compute(reference, hypothesis) -> MetricResult`
+- `BLEU1`, `BLEU2` (`bleu.py`): N-gram precision
+- `ROUGE1`, `ROUGEL` (`rouge.py`): Recall-oriented overlap
+- `compute_extraction_probability()` (`probability.py`): Hayes et al. p_z from token log-probs
 
-## Key Files & Patterns
+### FSID Module (`cleanslate/fsid/`)
 
-**Sample datasets** (`cleanslate/samples/`)
-- `SHAKESPEARE_SAMPLES`: Hamlet, Romeo & Juliet, Macbeth, etc.
-- `BOOK_SAMPLES`: Classic literature (1984, Pride & Prejudice, etc.)
-- Sample format: `{"name": str, "seed": str, "target": str}`
+Full unlearning pipeline:
 
-**CLI entry point** (`cleanslate/cli.py:19`)
-- Built with Typer (requires `pip install -e ".[cli]"`)
-- Commands: `run`, `generate`, `probe`, `show`, `compare`, `list-samples`
-- All CLI commands can be discovered via `cleanslate --help`
+**Config** (`config.py`):
+- `TrainerConfig` (dataclass, line 33): All training parameters
+  - Objectives: `ObjectiveType = "ga" | "grad_diff" | "npo" | "simnpo"`
+  - Train modes: `"full" | "lora"`
+  - Distributed: `"single" | "fsdp"` with `fsdp_sharding_strategy`, `fsdp_cpu_offload`
+  - LoRA params: `lora_r`, `lora_alpha`, `lora_dropout`, `lora_target_modules`
+  - Validation: `validation_path`, `eval_every`, `eval_max_samples`
+- `load_config(yaml_path, cli_overrides)`: Load from YAML with CLI override merging
 
-**Configuration**
-- No explicit config files; all configuration via CLI args or function parameters
-- Backend selected at `Experiment` init time
-- Device auto-detection (CUDA > MPS > CPU) with manual override via `--device`
+**Datasets** (`datasets/`):
+- `pool.py`: `build_candidate_pool()` — stratified sampling from eval results above memorization threshold
+- `unlearning.py`: `build_forget_pairs()` — sliding window (prefix, suffix) pairs for training; `ForgetPairDataset`, `TextSequenceDataset`
+- `io.py`: `load_local_records()` — load Parquet/JSON/JSONL files
 
-## Generation Data Captured
+**Rules** (`rules/`):
+- `baseline.py`: Default forget-set curation policy — uses direct prompt template, none seed mode
 
-When using `generate()` method on any backend, the following data is captured per generation:
+**Training** (`training/`):
+- `trainer.py`: `CleanSlateUnlearnTrainer` (extends HF `Trainer`), `train_unlearning(config)` entry point
+  - Objectives: GA (gradient ascent), GradDiff (gradient difference), NPO, SimNPO
+- `losses.py`: `compute_batch_nll()`, `compute_npo_loss()`, `compute_simnpo_loss()`, `compute_kl_retain_loss()`
+- `modeling.py`: `load_model()`, `load_tokenizer()` — model loading with dtype/device handling
+- `data.py`: `ForgetRetainDataset` (interleaved), `UnlearnDataCollator`
 
-- **Generated Text**: Full decoded output
-- **Token IDs & Strings**: Token-by-token IDs and decoded strings
-- **Token Log Probabilities**: Log probability of each generated token
-- **Top-K Alternatives**: Per position, the top `capture_top_k` (default 50) token IDs and their log probabilities
-- **Generation Parameters**: temperature, top_k, top_p, do_sample, max_new_tokens (for reproducibility)
-- **Timing**: Generation time in milliseconds
+**Scoring** (`scoring/benchmark.py`):
+- `compute_score()`: Compare pre/post eval Parquets → `UnlearningScore` with forget_score, retain_penalty
+- Window-level transitions: forgotten, retained_memorized, retained_clean, regressed
 
-This data is returned in `GenerationResult` dataclass and can be saved to Parquet or HuggingFace Datasets formats via `generation.py`.
+**Validation** (`validation/`):
+- `run_validation()` (`__init__.py`): lm-eval-harness with SGLang backend
+- `BenchmarkResult`, `SubsetResult` (`base.py`): Per-benchmark accuracy
+- `compare_validations()`, `load_validation()`, `save_validation()` (`results.py`)
 
-## Important Design Decisions
+**YAML Configs** (`configs/`): `ga.yaml`, `npo.yaml`, `simnpo.yaml`, `grad_diff.yaml`
 
-### Why HuggingFace Backend?
+### Supporting Modules
 
-See `BACKEND_RECOMMENDATIONS.md` for detailed analysis. TL;DR:
-- Simple, no complex setup
-- ~3GB memory vs vLLM's 40GB+ for same model
-- Direct logits access, no hacks needed
-- GPU-accelerated when available
+- **`prompts.py`**: `PromptTemplate` dataclass with `format_messages()`. Multiple templates for lyrics extraction testing (direct, helpful_assistant, etc.). `ALL_TEMPLATES` dict, `SeedMode` literal
+- **`chat_format.py`**: `format_chat(tokenizer, messages)` — applies chat template
+- **`prompt_dataset.py`**: `build_prompt_splits()` — builds HF DatasetDict from templates x seed modes
+- **`cli_utils.py`**: `run_parallel_eval()` (subprocess-based multi-GPU), `generate_hf_repo_name()`, `make_flame_graph()`, `estimate_windows()`
+- **`samples/`**: `shakespeare.py`, `books.py`, `songs.py`, `billboard.py` — sample datasets with `{"name", "seed", "target"}` format
+- **`results.py`**: `SampleResult` (line 12), `ExperimentResults` (line 72) — legacy result types
 
-### Computation Strategy
+## CLI Details (`cleanslate/cli.py`)
 
-- **Per-sample** not batched: Each (seed, target) runs independently (TODO item in GENERATION_MODE.md:254)
-- **Lazy loading**: Model loads on first `compute()` call, stays in memory
-- **No caching**: Each experiment run computes fresh (appropriate for memorization testing)
+**Entry point**: `cleanslate = "cleanslate.cli:main"` (also `python -m cleanslate`)
+
+**Model aliases** (`MODEL_ALIASES` dict, line 56):
+```
+llama-8b      → meta-llama/Llama-3.1-8B
+qwen-8b       → Qwen/Qwen3-8B
+qwen-8b-base  → Qwen/Qwen3-8B-Base
+olmo-7b       → allenai/Olmo-3-1025-7B
+gemma-12b     → google/gemma-3-12b-pt
+nemotron-9b   → nvidia/NVIDIA-Nemotron-Nano-9B-v2
+trinity-nano  → arcee-ai/Trinity-Nano-Base
+gpt-oss-20b   → openai/gpt-oss-20b
+```
+
+**`cleanslate eval`** (line 102): Main command. Key options: `-d` (HF dataset), `-c` (config), `-m` (model), `-w` (window size), `--stride`, `-t` (threshold), `--reproduce` (enable generation), `--decode` (greedy/beam), `--beam-width`, `-g` (num GPUs), `--hf-push`, `--no-push`
+
+**`cleanslate fsid`** subcommands: `build-pool`, `curate`, `train`, `score`, `validate` — see FSID Module above
+
+**Default dataset**: `unlearning-cleanslate/cleanslate_dataset`
+
+**Metadata columns**: `content_id`, `content_title`, `content_creators`, `content_year` (also aliased as `song_id`/`song_title`)
+
+## Dependencies
+
+**Core**: `torch`, `transformers`, `accelerate`, `pydantic>=2`, `pyyaml`, `python-dotenv`
+**Data**: `polars`, `pyarrow`, `fastparquet`, `datasets`
+**CLI**: `typer`, `rich` (optional group `[cli]`)
+**Export**: `pyarrow`, `datasets` (optional group `[export]`)
+**Unlearning**: `peft>=0.11.0` (optional group `[unlearning]`)
+**Validation**: `lm-eval` (optional group `[eval]`)
+**Backends**: `sglang` (`[sglang]`), `vllm` (`[vllm]`)
+
+Requires Python >=3.12. Uses `hatchling` build backend.
 
 ## Development Notes
 
 ### Type Strictness
-
-Project uses `mypy --strict`, so:
-- All function parameters must be typed
-- All return types explicit
-- No implicit `Any` types
-- Use union syntax `X | Y` (Python 3.12+)
+`mypy --strict` is configured in `pyproject.toml`. All function parameters and return types must be explicitly typed. Use `X | Y` union syntax (Python 3.12+).
 
 ### Testing
+- `test_evaluator.py`: Tests for MemorizationEvaluator
+- `test_eval_hf.py`: End-to-end eval with HuggingFace backend
 
-No formal test suite in the repo. Tests are:
-- `run_trial.py`: Manual integration test with Shakespeare samples
-- `test_generation.py` (untracked): Generation mode testing
+### Key Design Decisions
+- **SGLang is default backend** for `cleanslate eval` — optimized for GPU batched inference
+- **Sliding window approach**: Text is evaluated across overlapping windows (prefix + suffix), not as single seed/target pairs
+- **Per-sample not batched**: Each sliding window computation runs independently
+- **Lazy loading**: Backend loads model on first use
+- **FSDP for large models**: 7B+ models use `accelerate launch` with `--distributed-strategy fsdp` and `--gradient-checkpointing`
+- **No implicit distributed**: FSDP is opt-in via CLI flag, no automatic `device_map="auto"` for training
+- **HF Trainer**: Unlearning uses HF Trainer with custom loss computation via `CleanSlateUnlearnTrainer`
 
 ### Adding New Backends
-
 1. Create file in `cleanslate/backends/`
 2. Inherit from `InferenceBackend`
-3. Implement both abstract methods:
-   - `compute(seed, target, **decoding_options)` -> `ProbabilityResult`: Compute log probability for target given seed
-   - `generate(seed, max_new_tokens, temperature, top_k, top_p, do_sample, capture_top_k)` -> `GenerationResult`: Generate text and capture token logprobs + top-k alternatives
-4. Implement properties: `device` (str), `model_name` (str)
-5. Add backend type to `BackendType` literal in `experiment.py`
-6. Add initialization logic in `Experiment._get_estimator()` method
+3. Implement: `compute(seed, target) -> ProbabilityResult`, `generate(seed, strategy, ...) -> DecodingOutput`
+4. Implement properties: `device`, `model_name`, `tokenizer`
+5. Register in `BACKEND_REGISTRY` dict in `backends/__init__.py`
 
-### Adding New Sample Datasets
-
-1. Add to appropriate file in `cleanslate/samples/`
-2. Create list with `{"name": str, "seed": str, "target": str}` dicts
-3. Export from `cleanslate/samples/__init__.py`
-4. Update CLI choices if needed (`cli.py:29`)
-
-## Dependencies
-
-**Core**: torch, transformers, accelerate (HF ecosystem)
-**Data**: pandas, polars, pyarrow, fastparquet (data handling)
-**CLI**: typer, rich (if using CLI)
-**Export**: datasets (HuggingFace Datasets format)
-
-## Common Issues & Solutions
-
-- **Import errors**: Ensure you've installed with `pip install -e ".[cli,export]"` for full functionality
-- **GPU memory**: HuggingFace backend uses `device_map="auto"` to distribute across all available GPUs
-- **Model loading**: First run is slow (downloads & caches model), subsequent runs reuse cached model
-- **Output formats**: Generation mode saves to Parquet by default (fast, pandas/DuckDB compatible)
+### Adding New Unlearning Objectives
+1. Add loss function in `cleanslate/fsid/training/losses.py`
+2. Add objective name to `ALLOWED_OBJECTIVES` list in `trainer.py`
+3. Add case to `CleanSlateUnlearnTrainer.compute_loss()`
+4. Add YAML config template in `cleanslate/fsid/configs/`
+5. Update `ObjectiveType` literal in `config.py`
