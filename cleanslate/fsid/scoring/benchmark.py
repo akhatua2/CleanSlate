@@ -20,6 +20,19 @@ def _resolve_song_title(row: dict[str, Any]) -> str:
 
 
 @dataclass
+class WindowDelta:
+    """Per-window change in memorization after unlearning."""
+
+    idx: int
+    pre_p_z: float
+    post_p_z: float
+    delta_p_z: float  # pre - post (positive = less memorized)
+    pre_is_memorized: bool
+    post_is_memorized: bool
+    transition: str  # "forgotten" | "retained_memorized" | "retained_clean" | "regressed"
+
+
+@dataclass
 class SongDelta:
     """Per-song change in memorization after unlearning."""
 
@@ -32,6 +45,12 @@ class SongDelta:
     post_max_p_z: float
     delta_max_p_z: float
     in_forget_set: bool
+    num_windows: int | None = None
+    windows_forgotten: int | None = None
+    windows_retained_memorized: int | None = None
+    windows_retained_clean: int | None = None
+    windows_regressed: int | None = None
+    window_deltas: list[WindowDelta] | None = None
 
 
 @dataclass
@@ -49,12 +68,85 @@ class UnlearningScore:
 
     forget_score: float
     retain_penalty: float
-    combined_score: float
 
     per_song: list[SongDelta]
 
+    forget_total_windows: int | None = None
+    forget_windows_forgotten: int | None = None
+    forget_windows_regressed: int | None = None
+    forget_window_forget_rate: float | None = None
+
+    retain_total_windows: int | None = None
+    retain_windows_regressed: int | None = None
+    retain_window_stability: float | None = None
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        for song in d.get("per_song", []):
+            song.pop("window_deltas", None)
+        return d
+
+
+def _compute_window_deltas(
+    pre_windows: list[dict[str, Any]] | None,
+    post_windows: list[dict[str, Any]] | None,
+) -> tuple[int, int, int, int, int, list[WindowDelta]] | None:
+    """Match pre/post windows by idx and classify transitions.
+
+    Returns (num_windows, forgotten, retained_memorized, retained_clean, regressed, deltas)
+    or None if window data is absent.
+    """
+    if not pre_windows or not post_windows:
+        return None
+
+    pre_by_idx: dict[int, dict[str, Any]] = {int(w["idx"]): w for w in pre_windows}
+    post_by_idx: dict[int, dict[str, Any]] = {int(w["idx"]): w for w in post_windows}
+
+    common_idxs = sorted(set(pre_by_idx) & set(post_by_idx))
+    if not common_idxs:
+        return None
+
+    forgotten = 0
+    retained_memorized = 0
+    retained_clean = 0
+    regressed = 0
+    deltas: list[WindowDelta] = []
+
+    for idx in common_idxs:
+        pre_w = pre_by_idx[idx]
+        post_w = post_by_idx[idx]
+
+        pre_pz = float(pre_w.get("p_z", 0.0))
+        post_pz = float(post_w.get("p_z", 0.0))
+        pre_mem = bool(pre_w.get("is_memorized", False))
+        post_mem = bool(post_w.get("is_memorized", False))
+
+        if pre_mem and not post_mem:
+            transition = "forgotten"
+            forgotten += 1
+        elif pre_mem and post_mem:
+            transition = "retained_memorized"
+            retained_memorized += 1
+        elif not pre_mem and not post_mem:
+            transition = "retained_clean"
+            retained_clean += 1
+        else:
+            transition = "regressed"
+            regressed += 1
+
+        deltas.append(
+            WindowDelta(
+                idx=idx,
+                pre_p_z=pre_pz,
+                post_p_z=post_pz,
+                delta_p_z=pre_pz - post_pz,
+                pre_is_memorized=pre_mem,
+                post_is_memorized=post_mem,
+                transition=transition,
+            )
+        )
+
+    return (len(common_idxs), forgotten, retained_memorized, retained_clean, regressed, deltas)
 
 
 def _index_unique_by_song_id(
@@ -91,7 +183,6 @@ def compute_score(
     forget_set_path: str | Path,
     pre_eval_path: str | Path,
     post_eval_path: str | Path,
-    retain_weight: float = 1.0,
 ) -> UnlearningScore:
     """Compute a benchmark score from local pre/post eval artifacts."""
     forget_rows = load_local_records(forget_set_path)
@@ -149,6 +240,21 @@ def compute_score(
         pre_pz = float(pre_pz_raw)
         post_pz = float(post_pz_raw)
 
+        window_result = _compute_window_deltas(
+            pre.get("windows"), post.get("windows")
+        )
+        window_kwargs: dict[str, Any] = {}
+        if window_result is not None:
+            n_win, w_forg, w_ret_mem, w_ret_clean, w_reg, w_deltas = window_result
+            window_kwargs = dict(
+                num_windows=n_win,
+                windows_forgotten=w_forg,
+                windows_retained_memorized=w_ret_mem,
+                windows_retained_clean=w_ret_clean,
+                windows_regressed=w_reg,
+                window_deltas=w_deltas,
+            )
+
         deltas.append(
             SongDelta(
                 song_id=song_id,
@@ -160,6 +266,7 @@ def compute_score(
                 post_max_p_z=post_pz,
                 delta_max_p_z=pre_pz - post_pz,
                 in_forget_set=(song_id in forget_ids),
+                **window_kwargs,
             )
         )
 
@@ -197,7 +304,43 @@ def compute_score(
         else retain_mean_abs_delta_frac
     )
     retain_penalty = min(retain_penalty, 1.0)
-    combined_score = forget_score - retain_weight * retain_penalty
+
+    # Aggregate window-level metrics across forget/retain sets.
+    window_agg_kwargs: dict[str, Any] = {}
+    has_forget_windows = any(d.num_windows is not None for d in forget_deltas)
+    has_retain_windows = any(d.num_windows is not None for d in retain_deltas)
+
+    if has_forget_windows:
+        f_total = sum(d.num_windows for d in forget_deltas if d.num_windows is not None)
+        f_forgotten = sum(
+            d.windows_forgotten for d in forget_deltas if d.windows_forgotten is not None
+        )
+        f_regressed = sum(
+            d.windows_regressed for d in forget_deltas if d.windows_regressed is not None
+        )
+        f_retained_mem = sum(
+            d.windows_retained_memorized
+            for d in forget_deltas
+            if d.windows_retained_memorized is not None
+        )
+        f_pre_memorized = f_forgotten + f_retained_mem
+        window_agg_kwargs["forget_total_windows"] = f_total
+        window_agg_kwargs["forget_windows_forgotten"] = f_forgotten
+        window_agg_kwargs["forget_windows_regressed"] = f_regressed
+        window_agg_kwargs["forget_window_forget_rate"] = (
+            f_forgotten / f_pre_memorized if f_pre_memorized > 0 else 0.0
+        )
+
+    if has_retain_windows:
+        r_total = sum(d.num_windows for d in retain_deltas if d.num_windows is not None)
+        r_regressed = sum(
+            d.windows_regressed for d in retain_deltas if d.windows_regressed is not None
+        )
+        window_agg_kwargs["retain_total_windows"] = r_total
+        window_agg_kwargs["retain_windows_regressed"] = r_regressed
+        window_agg_kwargs["retain_window_stability"] = (
+            1.0 - (r_regressed / r_total) if r_total > 0 else 1.0
+        )
 
     return UnlearningScore(
         forget_count=forget_count,
@@ -209,8 +352,8 @@ def compute_score(
         retain_mean_abs_delta_pz=retain_mean_abs_delta_pz,
         forget_score=forget_score,
         retain_penalty=retain_penalty,
-        combined_score=combined_score,
         per_song=deltas,
+        **window_agg_kwargs,
     )
 
 

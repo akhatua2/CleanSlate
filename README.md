@@ -236,7 +236,7 @@ cleanslate fsid train \
   --retain-path data/fsid/curated/baseline/retain_set.parquet \
   --objective npo \
   --train-mode full \
-  --max-steps 300 \
+  --epochs 2 \
   --batch-size 2 \
   --grad-accum 16 \
   --output-dir results/fsid/unlearning/qwen_baseline
@@ -272,3 +272,46 @@ Constraints:
 - FSDP currently supports `train_mode=full` only (no LoRA + FSDP).
 - FSDP currently does not support the RMU objective.
 - Forget, retain, and validation sets must still be materialized locally before training.
+
+### 5) Score unlearning effectiveness
+
+After training, evaluate the unlearned checkpoint on the same eval dataset used in step 1, then compare pre/post memorization:
+
+```bash
+# Run eval on the unlearned checkpoint (produces post-eval results)
+cleanslate eval \
+  -d unlearning-cleanslate/generated_songs \
+  -c direct__first_line \
+  -m results/fsid/unlearning/olmo3_npo_fsdp/<run_name> \
+  --window-size 50 \
+  -o results/fsid/post_eval
+
+# Score: compare pre vs post memorization
+cleanslate fsid score \
+  --forget-path data/fsid/curated/baseline/olmo7b/forget_set.parquet \
+  --pre-eval  results/pre_eval/direct__first_line/results.parquet \
+  --post-eval results/fsid/post_eval/direct__first_line/results.parquet \
+  -o results/fsid/score.json
+```
+
+The scorer computes:
+
+| Metric | Description |
+|--------|-------------|
+| **Forget score** | Fraction of forget-set songs with reduced `memorized_fraction` (higher = better) |
+| **Retain penalty** | Normalized mean |Δ| in `memorized_fraction` for non-forget songs (lower = better) |
+| **Window forget rate** | Fraction of pre-memorized windows in forget set that became clean (higher = better) |
+| **Window stability** | 1 − (regressed windows / total windows) in retain set (higher = better) |
+
+**Window-level tracking:** When eval parquets contain a `windows` column (list of per-window dicts with `idx`, `p_z`, `is_memorized`), the scorer classifies each window into one of four transitions:
+
+| Transition | Pre → Post | Meaning |
+|------------|------------|---------|
+| **forgotten** | memorized → clean | Desired for forget set |
+| **retained_memorized** | memorized → memorized | Still memorized |
+| **retained_clean** | clean → clean | No change |
+| **regressed** | clean → memorized | Undesirable |
+
+These appear in the CLI output and JSON report. If the `windows` column is absent, scoring falls back to song-level metrics only.
+
+Input files (`--pre-eval` and `--post-eval`) must each have columns `song_id` (or `content_id`), `memorized_fraction`, and `max_p_z`, and must cover the exact same set of songs. Every song in `--forget-path` must appear in the eval universe.
