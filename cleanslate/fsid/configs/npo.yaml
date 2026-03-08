@@ -3,20 +3,20 @@ forget_path: null       # e.g. data/fsid/curated/baseline/forget_set.parquet
 objective: npo
 train_mode: full        # "full" or "lora"
 npo_beta: 0.1           # β: scales how far π_θ is allowed to drift from π_ref
-retain_path: null       # Recommended: open-unlearning's NPO always uses retain loss
-forget_weight: 1.0      # Scales forget loss term (open-unlearning gamma)
-retain_weight: 0.0      # open-unlearning default; set 0 to disable retain term
+retain_path: null       # Required: NPO needs retain loss to prevent model degradation
+forget_weight: 1.0      # Scales forget loss term (open-unlearning gamma=1.0)
+retain_weight: 1.0      # Matches open-unlearning alpha=1.0; DO NOT set to 0
 retain_loss_type: nll   # "nll" (CE) or "kl" (KL divergence from ref model)
 forget_text_col: lyrics
-retain_text_col: lyrics
+retain_text_col: text
 window_size: 50
 stride: 25
 max_windows_per_song: 64
 max_seq_len: 512
-num_epochs: 5
+num_epochs: 2
 batch_size: 2
 gradient_accum_steps: 16
-lr: 5.0e-5
+lr: 1.0e-5
 weight_decay: 0.0
 warmup_steps: 20
 max_grad_norm: 1.0
@@ -35,6 +35,7 @@ fsdp_cpu_offload: false
 seed: 42
 num_workers: 0
 gradient_checkpointing: false
+torch_compile: false
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05

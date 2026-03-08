@@ -49,6 +49,10 @@ def _run_curate(
     base_dataset: str | None,
     seed: int,
     output_dir: str | None,
+    retain_dataset: str = "wikitext",
+    retain_config: str = "wikitext-103-raw-v1",
+    retain_split: str = "validation",
+    retain_samples: int | None = None,
 ) -> None:
     try:
         rule = get_forget_set_rule(forget_set_rule)
@@ -59,6 +63,10 @@ def _run_curate(
         forget_song_rows,
         base_dataset=base_dataset,
         seed=seed,
+        retain_dataset=retain_dataset,
+        retain_config=retain_config,
+        retain_split=retain_split,
+        retain_samples=retain_samples,
     )
     resolved_output_dir = output_dir or str(Path("data/fsid/curated") / rule.name)
     paths = save_curated_sets(
@@ -225,6 +233,26 @@ def curate(
             "(default: data/fsid/curated/<rule>)"
         ),
     ),
+    retain_dataset: str = typer.Option(
+        "wikitext",
+        "--retain-dataset",
+        help="HF dataset for retain set (default: wikitext)",
+    ),
+    retain_config: str = typer.Option(
+        "wikitext-103-raw-v1",
+        "--retain-config",
+        help="HF dataset config for retain set",
+    ),
+    retain_split: str = typer.Option(
+        "validation",
+        "--retain-split",
+        help="HF dataset split for retain set",
+    ),
+    retain_samples: int | None = typer.Option(
+        None,
+        "--retain-samples",
+        help="Number of retain samples to draw (default: use all after filtering)",
+    ),
 ) -> None:
     """Curate forget/retain sets locally using a named forget-set rule."""
     _run_curate(
@@ -233,6 +261,10 @@ def curate(
         base_dataset=base_dataset,
         seed=seed,
         output_dir=output_dir,
+        retain_dataset=retain_dataset,
+        retain_config=retain_config,
+        retain_split=retain_split,
+        retain_samples=retain_samples,
     )
 
 
@@ -428,6 +460,11 @@ def train(
         "--gradient-checkpointing/--no-gradient-checkpointing",
         help="Enable gradient checkpointing",
     ),
+    torch_compile: bool | None = typer.Option(
+        None,
+        "--torch-compile/--no-torch-compile",
+        help="Enable torch.compile for faster training (requires use_orig_params)",
+    ),
     forget_text_col: str | None = typer.Option(
         None,
         "--forget-text-col",
@@ -520,6 +557,7 @@ def train(
         "validation_path": validation_path,
         "validation_text_col": validation_text_col,
         "gradient_checkpointing": gradient_checkpointing,
+        "torch_compile": torch_compile,
         "forget_text_col": forget_text_col,
         "retain_text_col": retain_text_col,
         "max_forget_pairs": max_forget_pairs,

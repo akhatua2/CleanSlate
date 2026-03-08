@@ -82,6 +82,7 @@ class TrainerConfig:
     num_workers: int = 0
     log_every: int = 10
     gradient_checkpointing: bool = False
+    torch_compile: bool = False
 
     lora_r: int = 16
     lora_alpha: int = 32
@@ -208,9 +209,16 @@ class TrainerConfig:
         use_gradient_checkpointing = self.gradient_checkpointing
         if self.distributed_strategy == "fsdp":
             fsdp_value = f"{self.fsdp_sharding_strategy} auto_wrap"
+            if self.fsdp_cpu_offload:
+                fsdp_value += " offload"
             fsdp_config = {
                 "auto_wrap_policy": "TRANSFORMER_BASED_WRAP",
-                "cpu_offload": self.fsdp_cpu_offload,
+                "backward_prefetch": "backward_pre",
+                "forward_prefetch": True,
+                "limit_all_gathers": True,
+                "sync_module_states": True,
+                "cpu_ram_efficient_loading": True,
+                "use_orig_params": True,
             }
             # With FSDP, use FSDP's activation checkpointing instead of
             # HF Trainer's gradient_checkpointing to avoid shape mismatches
@@ -241,6 +249,7 @@ class TrainerConfig:
             gradient_checkpointing=use_gradient_checkpointing,
             fsdp=fsdp_value,
             fsdp_config=fsdp_config,
+            torch_compile=self.torch_compile,
             dataloader_num_workers=self.num_workers,
             remove_unused_columns=False,
             run_name=run_name,

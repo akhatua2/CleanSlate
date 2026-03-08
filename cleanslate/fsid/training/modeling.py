@@ -35,6 +35,7 @@ def load_model(
     config: TrainerConfig,
     *,
     local_files_only: bool = False,
+    device_map: str | None = None,
 ) -> Any:
     """Load model for HF Trainer. Device placement and dtype are handled by Trainer."""
     import torch
@@ -46,12 +47,18 @@ def load_model(
     }
     torch_dtype = dtype_map.get(config.dtype, torch.bfloat16)
 
+    load_kwargs: dict[str, Any] = {
+        "torch_dtype": torch_dtype,
+        "low_cpu_mem_usage": True,
+        "trust_remote_code": True,
+        "local_files_only": local_files_only,
+    }
+    if device_map is not None:
+        load_kwargs["device_map"] = device_map
+
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
-        torch_dtype=torch_dtype,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-        local_files_only=local_files_only,
+        **load_kwargs,
     )
     patch_rope_scaling(model)
 
