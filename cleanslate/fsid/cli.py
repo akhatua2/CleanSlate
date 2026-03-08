@@ -600,7 +600,7 @@ def validate(
         help="Batch size for evaluation ('auto' or integer)",
     ),
     mem_fraction: float = typer.Option(
-        0.85,
+        0.65,
         "--mem-fraction",
         help="GPU memory fraction for SGLang engine",
     ),
@@ -609,6 +609,17 @@ def validate(
         "--tp-size",
         help="Tensor parallel size for multi-GPU",
     ),
+    num_gpus: int = typer.Option(
+        1,
+        "--num-gpus",
+        "-g",
+        help="Number of GPUs (split across TP and DP automatically)",
+    ),
+    gpu_ids: str | None = typer.Option(
+        None,
+        "--gpu-ids",
+        help="Comma-separated GPU IDs to use (e.g. '2,3,4,5'). Default: 0 to num_gpus-1",
+    ),
     seed: int = typer.Option(
         42,
         "--seed",
@@ -616,7 +627,32 @@ def validate(
     ),
 ) -> None:
     """Run validation benchmarks on a model using lm-evaluation-harness."""
+    import os
+
     task_names = [b.strip() for b in benchmarks.split(",") if b.strip()]
+
+    # SGLang supports TP + DP.  Compute dp_size from num_gpus and tp_size.
+    if num_gpus % tp_size != 0:
+        console.print(
+            f"[red]Error: --num-gpus ({num_gpus}) must be divisible by --tp-size ({tp_size})[/red]"
+        )
+        raise typer.Exit(1)
+    dp_size = num_gpus // tp_size
+
+    # Set CUDA_VISIBLE_DEVICES for multi-GPU
+    if num_gpus > 1:
+        if gpu_ids:
+            gpus = [int(g.strip()) for g in gpu_ids.split(",")]
+            if len(gpus) != num_gpus:
+                console.print(
+                    f"[red]Error: --gpu-ids has {len(gpus)} GPUs but --num-gpus is {num_gpus}[/red]"
+                )
+                raise typer.Exit(1)
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                str(g) for g in range(num_gpus)
+            )
 
     # Parse batch_size: allow "auto" or integer string
     bs: int | str
@@ -627,6 +663,10 @@ def validate(
 
     console.print(f"[bold]Model:[/bold] {model}")
     console.print(f"[bold]Tasks:[/bold] {', '.join(task_names)}")
+    if tp_size > 1:
+        console.print(f"[bold]TP size:[/bold] {tp_size}")
+    if dp_size > 1:
+        console.print(f"[bold]DP size:[/bold] {dp_size}")
     if limit is not None:
         console.print(f"[bold]Limit:[/bold] {limit} items per task")
 
@@ -638,6 +678,7 @@ def validate(
         batch_size=bs,
         mem_fraction=mem_fraction,
         tp_size=tp_size,
+        dp_size=dp_size,
     )
 
     out = save_validation(results, output, model_name=model)

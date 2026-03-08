@@ -6,11 +6,38 @@ import logging
 import time
 from typing import Any
 
-import lm_eval
+import lm_eval  # type: ignore[import-untyped]
 
 from cleanslate.fsid.validation.base import BenchmarkResult, SubsetResult
 
 logger = logging.getLogger(__name__)
+
+_sglang_patched = False
+
+
+def _patch_sglang_sampling_params() -> None:
+    """Patch SamplingParams to accept max_tokens (lm-eval 0.4.11 compat).
+
+    lm-eval 0.4.11 passes ``max_tokens`` but sglang 0.5.9+ expects
+    ``max_new_tokens``.  This one-time monkey-patch aliases the old name
+    so the two libraries work together without modifications to either.
+    """
+    global _sglang_patched  # noqa: PLW0603
+    if _sglang_patched:
+        return
+
+    from sglang.srt.sampling.sampling_params import SamplingParams  # type: ignore[import-untyped]
+
+    _original_init = SamplingParams.__init__
+
+    def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        if "max_tokens" in kwargs and "max_new_tokens" not in kwargs:
+            kwargs["max_new_tokens"] = kwargs.pop("max_tokens")
+        _original_init(self, *args, **kwargs)
+
+    SamplingParams.__init__ = _patched_init  # type: ignore[method-assign]
+    _sglang_patched = True
+    logger.debug("Patched SamplingParams to accept max_tokens alias")
 
 
 def run_validation(
@@ -22,6 +49,7 @@ def run_validation(
     batch_size: int | str = "auto",
     mem_fraction: float = 0.85,
     tp_size: int = 1,
+    dp_size: int = 1,
 ) -> dict[str, BenchmarkResult]:
     """Run validation benchmarks using lm-evaluation-harness with SGLang backend.
 
@@ -33,15 +61,25 @@ def run_validation(
         batch_size: Batch size for evaluation ("auto" or int).
         mem_fraction: GPU memory fraction for SGLang engine.
         tp_size: Tensor parallel size.
+        dp_size: Data parallel size.
 
     Returns:
         Dict mapping task name to BenchmarkResult.
     """
+    _patch_sglang_sampling_params()
+
     t0 = time.time()
+
+    model_args = (
+        f"pretrained={model_name},"
+        f"mem_fraction_static={mem_fraction},"
+        f"tp_size={tp_size},"
+        f"dp_size={dp_size}"
+    )
 
     eval_results: dict[str, Any] = lm_eval.simple_evaluate(
         model="sglang",
-        model_args=f"pretrained={model_name},mem_fraction_static={mem_fraction},tp_size={tp_size}",
+        model_args=model_args,
         tasks=tasks,
         num_fewshot=num_fewshot,
         limit=limit,
