@@ -226,6 +226,10 @@ def eval(
         None, "--gpu-ids",
         help="Comma-separated GPU IDs to use (e.g. '2,3,4,5'). Default: 0 to num_gpus-1"
     ),
+    tp_size: int = typer.Option(
+        1, "--tp-size",
+        help="Tensor parallel size (shard model across N GPUs). Requires SGLang backend."
+    ),
 ):
     """
     Sliding window memorization evaluation.
@@ -246,6 +250,14 @@ def eval(
 
     # Resolve model alias
     model_path, model_clean = resolve_model(model)
+
+    # Validate tensor parallelism options
+    if tp_size > 1 and backend != "sglang":
+        console.print("[red]Error: --tp-size requires SGLang backend[/red]")
+        raise typer.Exit(1)
+    if num_gpus > 1 and num_gpus % tp_size != 0:
+        console.print(f"[red]Error: --num-gpus ({num_gpus}) must be divisible by --tp-size ({tp_size})[/red]")
+        raise typer.Exit(1)
 
     # Handle multi-GPU parallelism
     if num_gpus > 1 and part_id is None:
@@ -387,9 +399,12 @@ def eval(
     if backend == "sglang":
         backend_kwargs["mem_fraction_static"] = mem_fraction
         backend_kwargs["cuda_graph_max_bs"] = cuda_graph_bs
-        # Use native DP if num_gpus > 1
-        if num_gpus > 1:
-            backend_kwargs["dp_size"] = num_gpus
+        if tp_size > 1:
+            backend_kwargs["tp_size"] = tp_size
+        # Use native DP if num_gpus > tp_size
+        dp = num_gpus // tp_size
+        if dp > 1:
+            backend_kwargs["dp_size"] = dp
     evaluator = MemorizationEvaluator(
         model=model_path,
         backend=backend,
