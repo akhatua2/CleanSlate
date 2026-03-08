@@ -47,6 +47,10 @@ class SongDelta:
     post_max_p_z: float
     delta_max_p_z: float
     in_forget_set: bool
+    pre_mean_perplexity: float | None = None
+    post_mean_perplexity: float | None = None
+    pre_min_perplexity: float | None = None
+    post_min_perplexity: float | None = None
     num_windows: int | None = None
     windows_forgotten: int | None = None
     windows_retained_memorized: int | None = None
@@ -81,6 +85,11 @@ class UnlearningScore:
     retain_total_windows: int | None = None
     retain_windows_regressed: int | None = None
     retain_window_stability: float | None = None
+
+    forget_mean_delta_mean_ppl: float | None = None
+    forget_mean_delta_min_ppl: float | None = None
+    retain_mean_abs_delta_mean_ppl: float | None = None
+    retain_mean_abs_delta_min_ppl: float | None = None
 
     # Optional validation benchmark deltas (populated when --pre-validation / --post-validation provided)
     validation_deltas: list[dict[str, Any]] | None = None
@@ -255,6 +264,21 @@ def compute_score(
         pre_pz = float(pre_pz_raw)
         post_pz = float(post_pz_raw)
 
+        # Extract perplexity (optional columns)
+        pre_mean_ppl_raw = pre.get("mean_perplexity")
+        post_mean_ppl_raw = post.get("mean_perplexity")
+        pre_min_ppl_raw = pre.get("min_perplexity")
+        post_min_ppl_raw = post.get("min_perplexity")
+        ppl_kwargs: dict[str, float | None] = {}
+        if pre_mean_ppl_raw is not None:
+            ppl_kwargs["pre_mean_perplexity"] = float(pre_mean_ppl_raw)
+        if post_mean_ppl_raw is not None:
+            ppl_kwargs["post_mean_perplexity"] = float(post_mean_ppl_raw)
+        if pre_min_ppl_raw is not None:
+            ppl_kwargs["pre_min_perplexity"] = float(pre_min_ppl_raw)
+        if post_min_ppl_raw is not None:
+            ppl_kwargs["post_min_perplexity"] = float(post_min_ppl_raw)
+
         window_result = _compute_window_deltas(pre.get("windows"), post.get("windows"))
         window_kwargs: dict[str, Any] = {}
         if window_result is not None:
@@ -279,6 +303,7 @@ def compute_score(
                 post_max_p_z=post_pz,
                 delta_max_p_z=pre_pz - post_pz,
                 in_forget_set=(song_id in forget_ids),
+                **ppl_kwargs,
                 **window_kwargs,
             )
         )
@@ -308,6 +333,39 @@ def compute_score(
     retain_mean_abs_delta_pz = _mean(
         [abs(delta.delta_max_p_z) for delta in retain_deltas]
     )
+
+    # Perplexity aggregates (only when both pre and post are present)
+    ppl_agg_kwargs: dict[str, float | None] = {}
+
+    forget_mean_ppl_deltas = [
+        d.post_mean_perplexity - d.pre_mean_perplexity
+        for d in forget_deltas
+        if d.pre_mean_perplexity is not None and d.post_mean_perplexity is not None
+    ]
+    forget_min_ppl_deltas = [
+        d.post_min_perplexity - d.pre_min_perplexity
+        for d in forget_deltas
+        if d.pre_min_perplexity is not None and d.post_min_perplexity is not None
+    ]
+    if forget_mean_ppl_deltas:
+        ppl_agg_kwargs["forget_mean_delta_mean_ppl"] = _mean(forget_mean_ppl_deltas)
+    if forget_min_ppl_deltas:
+        ppl_agg_kwargs["forget_mean_delta_min_ppl"] = _mean(forget_min_ppl_deltas)
+
+    retain_mean_ppl_deltas = [
+        abs(d.post_mean_perplexity - d.pre_mean_perplexity)
+        for d in retain_deltas
+        if d.pre_mean_perplexity is not None and d.post_mean_perplexity is not None
+    ]
+    retain_min_ppl_deltas = [
+        abs(d.post_min_perplexity - d.pre_min_perplexity)
+        for d in retain_deltas
+        if d.pre_min_perplexity is not None and d.post_min_perplexity is not None
+    ]
+    if retain_mean_ppl_deltas:
+        ppl_agg_kwargs["retain_mean_abs_delta_mean_ppl"] = _mean(retain_mean_ppl_deltas)
+    if retain_min_ppl_deltas:
+        ppl_agg_kwargs["retain_mean_abs_delta_min_ppl"] = _mean(retain_min_ppl_deltas)
 
     forget_score = forget_fraction_improved
     pre_retain_mean = _mean([delta.pre_memorized_fraction for delta in retain_deltas])
@@ -372,6 +430,7 @@ def compute_score(
         forget_score=forget_score,
         retain_penalty=retain_penalty,
         per_song=deltas,
+        **ppl_agg_kwargs,
         **window_agg_kwargs,
     )
 

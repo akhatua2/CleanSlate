@@ -50,7 +50,11 @@ from cleanslate.fsid.cli import fsid_app
 DEFAULT_DATASET = "unlearning-cleanslate/cleanslate_dataset"
 
 # Metadata columns to copy from source dataset to eval results
-METADATA_COLUMNS = ["content_id", "content_title", "content_creators", "content_year"]
+METADATA_COLUMNS = [
+    "content_id", "content_title", "content_creators", "content_year",
+    "song_id", "song_title", "song_artists", "song_year",
+    "reference_target",
+]
 
 # Model aliases: short name -> (full HF path, clean name for repos)
 MODEL_ALIASES: dict[str, tuple[str, str]] = {
@@ -76,7 +80,7 @@ def resolve_model(model: str) -> tuple[str, str]:
 
 def get_item_name(item: dict[str, Any]) -> str:
     """Get display name for an item."""
-    return str(item.get("content_title") or item.get("content_id") or "unknown")
+    return str(item.get("content_title") or item.get("song_title") or item.get("content_id") or item.get("song_id") or "unknown")
 
 
 def copy_metadata(item: dict[str, Any], target: dict[str, Any]) -> None:
@@ -84,11 +88,16 @@ def copy_metadata(item: dict[str, Any], target: dict[str, Any]) -> None:
     for col in METADATA_COLUMNS:
         if col in item:
             target[col] = item[col]
-    # Emit song_id/song_title aliases so FSID scorer can match by either name
-    if "content_id" in item and "song_id" not in target:
-        target["song_id"] = item["content_id"]
-    if "content_title" in item and "song_title" not in target:
-        target["song_title"] = item["content_title"]
+    # Bidirectional aliases: content_* <-> song_*
+    _ALIASES = [
+        ("content_id", "song_id"),
+        ("content_title", "song_title"),
+    ]
+    for content_name, song_name in _ALIASES:
+        if content_name in target and song_name not in target:
+            target[song_name] = target[content_name]
+        elif song_name in target and content_name not in target:
+            target[content_name] = target[song_name]
 
 app = typer.Typer(
     name="cleanslate",
@@ -565,9 +574,9 @@ def eval(
                     "eval_threshold": threshold,
                     "window_size": window_size,
                     "stride": stride,
-                    "decode_strategy": decode_strategy,
-                    "beam_width": beam_width if decode_strategy == "beam" else None,
-                    "length_penalty": length_penalty if decode_strategy == "beam" else None,
+                    "decode_strategy": decode_strategy if reproduce else None,
+                    "beam_width": beam_width if decode_strategy == "beam" and reproduce else None,
+                    "length_penalty": length_penalty if decode_strategy == "beam" and reproduce else None,
                     "reproduce_all_windows": reproduce_all,
                     # All windows (array)
                     "windows": windows_array,
@@ -866,9 +875,9 @@ def eval(
         "window_size": window_size,
         "stride": stride,
         "threshold": threshold,
-        "decode_strategy": decode_strategy,
-        "beam_width": beam_width if decode_strategy == "beam" else None,
-        "length_penalty": length_penalty if decode_strategy == "beam" else None,
+        "decode_strategy": decode_strategy if reproduce else None,
+        "beam_width": beam_width if decode_strategy == "beam" and reproduce else None,
+        "length_penalty": length_penalty if decode_strategy == "beam" and reproduce else None,
         "reproduce_all_windows": reproduce_all,
         "num_items": len(all_records),
         "total_windows": total_windows,
