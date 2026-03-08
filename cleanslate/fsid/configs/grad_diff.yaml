@@ -34,6 +34,7 @@ fsdp_cpu_offload: false
 seed: 42
 num_workers: 0
 gradient_checkpointing: false
+torch_compile: false
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05

@@ -1,13 +1,16 @@
-"""Baseline local rule: use direct/no-seed lyric prompts and retain nothing."""
+"""Baseline local rule: use direct/no-seed lyric prompts, retain from WikiText."""
 
 import json
+import logging
 import random
 from pathlib import Path
 from typing import Any
 
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 
 from cleanslate.prompts import DIRECT
+
+logger = logging.getLogger(__name__)
 
 RULE_NAME = "baseline"
 ARTIFACT_RULE_NAME = "baseline_literal"
@@ -39,6 +42,10 @@ def curate_baseline_sets(
     *,
     base_dataset: str | None = None,
     seed: int = 42,
+    retain_dataset: str = "wikitext",
+    retain_config: str = "wikitext-103-raw-v1",
+    retain_split: str = "validation",
+    retain_samples: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Create baseline request/forget/retain sets from preselected unlearn songs."""
     if not unlearn_song_records:
@@ -100,7 +107,28 @@ def curate_baseline_sets(
             }
         )
 
-    retain_rows: list[dict[str, Any]] = []
+    # Build retain set from WikiText (general-domain text to preserve model quality)
+    rng = random.Random(seed)  # re-seed for retain sampling reproducibility
+    logger.info(
+        "Loading retain data from %s/%s split=%s",
+        retain_dataset,
+        retain_config,
+        retain_split,
+    )
+    wiki = load_dataset(retain_dataset, retain_config, split=retain_split)
+    # Filter empty/short lines (WikiText has many blank lines and headings)
+    wiki_texts = [
+        row["text"]
+        for row in wiki
+        if isinstance(row.get("text"), str) and len(row["text"].strip()) > 100
+    ]
+    if retain_samples is not None:
+        wiki_texts = rng.sample(wiki_texts, min(retain_samples, len(wiki_texts)))
+    retain_rows: list[dict[str, Any]] = [
+        {"text": text, "rule_name": ARTIFACT_RULE_NAME} for text in wiki_texts
+    ]
+    logger.info("Built %d retain rows from %s", len(retain_rows), retain_dataset)
+
     return requests, forget_rows, retain_rows
 
 

@@ -94,9 +94,7 @@ class CleanSlateUnlearnTrainer(Trainer):
         return 6 * total_tokens * num_params
 
     @staticmethod
-    def prepare_ref_model(
-        config: TrainerConfig, accelerator: Any
-    ) -> Any:
+    def prepare_ref_model(config: TrainerConfig, accelerator: Any) -> Any:
         """Load a separate frozen reference model from disk.
 
         Avoids deepcopy which materializes all FSDP shards on every rank,
@@ -152,9 +150,7 @@ class CleanSlateUnlearnTrainer(Trainer):
                     model, self.ref_model, r_ids, r_mask, r_labels
                 )
             else:
-                r_out = model(
-                    input_ids=r_ids, attention_mask=r_mask, labels=r_labels
-                )
+                r_out = model(input_ids=r_ids, attention_mask=r_mask, labels=r_labels)
                 retain_loss = r_out.loss
 
         total_loss = self.forget_weight * forget_loss + self.retain_weight * retain_loss
@@ -167,10 +163,12 @@ class CleanSlateUnlearnTrainer(Trainer):
         return total_loss
 
     def _log_losses(self, forget_loss: torch.Tensor, retain_loss: torch.Tensor) -> None:
-        self.log({
-            "forget_loss": forget_loss.detach().item(),
-            "retain_loss": retain_loss.detach().item(),
-        })
+        self.log(
+            {
+                "forget_loss": forget_loss.detach().item(),
+                "retain_loss": retain_loss.detach().item(),
+            }
+        )
 
     def prediction_step(
         self,
@@ -214,7 +212,10 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         max_windows_per_song=config.max_windows_per_song,
         max_seq_len=config.max_seq_len,
     )
-    if config.max_forget_pairs is not None and len(forget_pairs) > config.max_forget_pairs:
+    if (
+        config.max_forget_pairs is not None
+        and len(forget_pairs) > config.max_forget_pairs
+    ):
         forget_pairs = forget_pairs[: config.max_forget_pairs]
     if not forget_pairs:
         raise ValueError(
@@ -265,7 +266,13 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
 
     # --- Model ---
     logger.info("Loading model: %s", config.model_name)
-    model = load_model(config)
+    # Use device_map="auto" for non-FSDP multi-GPU (e.g. LoRA with model parallelism)
+    use_device_map = (
+        "auto"
+        if config.distributed_strategy != "fsdp" and config.device == "auto"
+        else None
+    )
+    model = load_model(config, device_map=use_device_map)
 
     # LoRA
     if config.train_mode == "lora":
@@ -274,7 +281,9 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         except ImportError as e:
             raise ImportError("LoRA requires peft: pip install peft") from e
 
-        target_modules = [m.strip() for m in config.lora_target_modules.split(",") if m.strip()]
+        target_modules = [
+            m.strip() for m in config.lora_target_modules.split(",") if m.strip()
+        ]
         lora_cfg = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=config.lora_r,
@@ -311,6 +320,13 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         data_collator=train_collator,
         processing_class=tokenizer,
     )
+
+    if config.objective in ("npo", "simnpo") and config.retain_weight == 0:
+        logger.warning(
+            "%s with retain_weight=0: no constraint on non-forget data. "
+            "Model may degrade globally. Set retain_weight > 0 with a retain_path.",
+            config.objective.upper(),
+        )
 
     # File logging + config snapshot (main process only)
     file_handler: logging.FileHandler | None = None
