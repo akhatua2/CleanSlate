@@ -225,7 +225,7 @@ cleanslate fsid curate \
 
 Baseline policy:
 - `D_forget` uses the selected unlearn songs, formats them with the `direct` prompt template and `none` seed mode, and keeps the true lyrics as the target text
-- `D_retain = ∅`
+- `D_retain` is loaded from WikiText (general-domain text to preserve model quality). By default uses all filtered rows from `wikitext-103-raw-v1` validation split. Use `--retain-samples N` to subsample
 
 ### 3) Train unlearning model locally in PyTorch
 
@@ -253,6 +253,7 @@ accelerate launch --num_processes 10 -m cleanslate fsid train \
   --config cleanslate/fsid/configs/npo.yaml \
   -m "allenai/Olmo-3-1025-7B" \
   --forget-path data/fsid/curated/baseline/olmo7b/forget_set.parquet \
+  --retain-path data/fsid/curated/baseline/olmo7b/retain_set.parquet \
   --objective npo \
   --distributed-strategy fsdp \
   --fsdp-sharding-strategy full_shard \
