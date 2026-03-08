@@ -669,12 +669,12 @@ def score(
     pre_eval_path: str = typer.Option(
         ...,
         "--pre-eval",
-        help="Local eval results parquet BEFORE unlearning",
+        help="Eval results BEFORE unlearning: local parquet path or HF dataset ID (org/dataset or org/dataset:config)",
     ),
     post_eval_path: str = typer.Option(
         ...,
         "--post-eval",
-        help="Local eval results parquet AFTER unlearning (run cleanslate eval on checkpoint)",
+        help="Eval results AFTER unlearning: local parquet path or HF dataset ID (org/dataset or org/dataset:config)",
     ),
     pre_validation_path: str | None = typer.Option(
         None,
@@ -717,6 +717,14 @@ def score(
         f"  Mean Δ memorized_frac:  {result.forget_mean_delta_frac:+.4f}  (positive = less memorized)"
     )
     console.print(f"  Mean Δ max_p_z:         {result.forget_mean_delta_pz:+.6f}")
+    if result.forget_mean_delta_mean_ppl is not None:
+        console.print(
+            f"  Mean Δ mean_ppl:        {result.forget_mean_delta_mean_ppl:+.4f}  (positive = higher ppl, more forgotten)"
+        )
+    if result.forget_mean_delta_min_ppl is not None:
+        console.print(
+            f"  Mean Δ min_ppl:         {result.forget_mean_delta_min_ppl:+.4f}"
+        )
     if result.forget_total_windows is not None:
         console.print(f"  Total windows:          {result.forget_total_windows}")
         console.print(
@@ -735,6 +743,14 @@ def score(
         f"  Mean |Δ| memorized_frac:{result.retain_mean_abs_delta_frac:.4f}  (lower = better)"
     )
     console.print(f"  Mean |Δ| max_p_z:       {result.retain_mean_abs_delta_pz:.6f}")
+    if result.retain_mean_abs_delta_mean_ppl is not None:
+        console.print(
+            f"  Mean |Δ| mean_ppl:      {result.retain_mean_abs_delta_mean_ppl:.4f}  (lower = better)"
+        )
+    if result.retain_mean_abs_delta_min_ppl is not None:
+        console.print(
+            f"  Mean |Δ| min_ppl:       {result.retain_mean_abs_delta_min_ppl:.4f}"
+        )
     if result.retain_total_windows is not None:
         console.print(f"  Total windows:          {result.retain_total_windows}")
         console.print(
