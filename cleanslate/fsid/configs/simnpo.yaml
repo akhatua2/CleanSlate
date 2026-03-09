@@ -2,10 +2,10 @@ model_name: null        # e.g. allenai/OLMo-3-32B
 forget_path: null       # e.g. data/fsid/curated/baseline/forget_set.parquet
 objective: simnpo
 train_mode: full        # "full" or "lora"
-npo_beta: 0.1           # β: sharpness of the sigmoid
-simnpo_gamma: 0.1       # γ: margin (total, not β-scaled)
+npo_beta: 4.5           # β: sharpness of the sigmoid (matches open-unlearning SimNPO.yaml)
+simnpo_gamma: 0.0       # γ = β * δ where δ=0.0 in open-unlearning (margin)
 retain_path: null       # Required: SimNPO needs retain loss to prevent model degradation
-forget_weight: 1.0      # Scales forget loss term (open-unlearning uses gamma: 0.125)
+forget_weight: 0.125    # Scales forget loss term (matches open-unlearning gamma: 0.125)
 retain_weight: 1.0      # Matches open-unlearning alpha=1.0; DO NOT set to 0
 retain_loss_type: nll   # "nll" (CE) or "kl" (KL divergence from ref model)
 forget_text_col: lyrics
