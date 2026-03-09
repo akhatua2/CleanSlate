@@ -354,3 +354,81 @@ cleanslate fsid score \
 | `--batch-size` | `auto` | Batch size (`auto` or integer) |
 | `--tp-size` | 1 | Tensor parallel size for multi-GPU |
 | `--mem-fraction` | 0.85 | GPU memory fraction for SGLang engine |
+
+## QA Benchmark
+
+The QA benchmark evaluates **semantic knowledge retention** after unlearning. While p_z measures verbatim memorization, the QA benchmark tests whether the model still *knows* factual information about the content.
+
+**Goal:** After unlearning, p_z (verbatim memorization) should DROP, but QA accuracy (semantic knowledge) should STAY THE SAME.
+
+### Dataset
+
+The QA benchmark is available on HuggingFace:
+
+```python
+from datasets import load_dataset
+ds = load_dataset("unlearning-cleanslate/cleanslate_dataset", "qa_benchmark")
+# 1616 validated QA pairs with columns: question, answer, difficulty, num_models_passed
+```
+
+**Difficulty levels** (based on how many base models answered correctly):
+- `common`: 6/6 models (185 QAs)
+- `general`: 4-5/6 models (955 QAs)
+- `expert`: 3/6 models (476 QAs)
+
+### Running with lm-eval
+
+```bash
+# Evaluate a model on the QA benchmark
+lm_eval --model hf \
+    --model_args pretrained=allenai/Olmo-3-1025-7B,dtype=bfloat16 \
+    --tasks cleanslate_qa \
+    --include_path cleanslate/fsid/qa/tasks \
+    --batch_size 16
+
+# With vLLM backend (faster)
+lm_eval --model vllm \
+    --model_args pretrained=allenai/Olmo-3-1025-7B,dtype=bfloat16 \
+    --tasks cleanslate_qa \
+    --include_path cleanslate/fsid/qa/tasks \
+    --batch_size auto
+```
+
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `exact_match` | Strict string equality (usually ~0%) |
+| `llm_judge_match` | Semantic correctness via Gemini LLM judge (recommended) |
+
+The LLM judge checks if the model's answer conveys the same meaning as the reference, handling variations like "The 1980s" vs "1980s".
+
+### Baseline Results
+
+| Model | llm_judge_match |
+|-------|-----------------|
+| Qwen/Qwen3-8B | 63.37% |
+| allenai/Olmo-3-1025-7B | 54.70% |
+
+### QA Generation Pipeline
+
+To generate new QA pairs for additional content:
+
+```bash
+# Generate QA candidates (uses Gemini)
+cleanslate fsid qa generate \
+  -d unlearning-cleanslate/cleanslate_dataset \
+  -n 10 \
+  -o data/fsid/qa/candidates.parquet
+
+# Validate against base models (pass@k)
+cleanslate fsid qa validate \
+  -i data/fsid/qa/candidates.parquet \
+  -k 5 \
+  -o data/fsid/qa/validated.parquet
+```
+
+QA pairs must be:
+- **Atomic**: Exactly one unambiguous answer
+- **Objective**: No subjective interpretation
+- **Self-contained**: Include song/book title in the question
