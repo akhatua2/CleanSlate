@@ -1007,6 +1007,284 @@ def eval_all(
         console.print(f"  [{color}]{icon} {model}: {status}[/{color}]")
 
 
+@app.command("corpus-sweep")
+def corpus_sweep(
+    # Dataset source
+    hf_dataset: str = typer.Option(
+        DEFAULT_DATASET,
+        "--hf-dataset", "-d",
+        help="HuggingFace dataset to analyze"
+    ),
+    text_col: str = typer.Option(
+        "reference_target",
+        "--text-col",
+        help="Column containing the text"
+    ),
+    # Sliding window settings (same as eval)
+    window_size: int = typer.Option(
+        50, "--window-size", "-w",
+        help="Window size in tokens (prefix and suffix each)"
+    ),
+    stride: int = typer.Option(
+        25, "--stride",
+        help="Stride in tokens"
+    ),
+    # Corpus selection
+    corpora: str = typer.Option(
+        "rpj,pile,dolma,dclm,c4",
+        "--corpora", "-c",
+        help="Comma-separated corpus names: rpj (RedPajama 1.4T), pile (Pile 383B), dolma (Dolma 2.6T), dclm (DCLM 4.3T), c4 (C4 198B), olmomix (OLMo 4.6T)"
+    ),
+    # Sampling
+    limit: int = typer.Option(
+        None, "--limit", "-n",
+        help="Limit number of items to process"
+    ),
+    limit_windows: int = typer.Option(
+        None, "--limit-windows",
+        help="Limit total windows to query (for testing)"
+    ),
+    # Rate limiting & parallelism
+    rate_limit: float = typer.Option(
+        0.5, "--rate-limit",
+        help="Delay between batch completions (seconds)"
+    ),
+    workers: int = typer.Option(
+        3, "--workers", "-j",
+        help="Number of parallel workers (keep low to avoid IP block)"
+    ),
+    sample_rate: float = typer.Option(
+        1.0, "--sample-rate",
+        help="Fraction of windows to sample (0.1 = 10%)"
+    ),
+    # Output
+    output: str = typer.Option(
+        "corpus_sweep.parquet", "--output", "-o",
+        help="Output parquet file"
+    ),
+    no_push: bool = typer.Option(
+        False, "--no-push",
+        help="Skip pushing to HuggingFace"
+    ),
+    hf_org: str = typer.Option(
+        "unlearning-cleanslate",
+        "--hf-org",
+        help="HuggingFace org for push"
+    ),
+):
+    """
+    Query infini-gram API to find training data frequency for sliding windows.
+
+    Applies the same sliding window approach as `eval` to the cleanslate_dataset,
+    then queries infini-gram to find how often each window appears in training corpora.
+
+    This helps understand whether content frequency in training data correlates
+    with memorization.
+
+    Example:
+        cleanslate corpus-sweep -n 10 -c rpj,pile
+    """
+    from tqdm import tqdm
+    from cleanslate.infinigram import (
+        CORPUS_INDICES,
+        query_window,
+        format_count,
+    )
+    from cleanslate.evaluator import MemorizationEvaluator
+
+    # Parse corpora
+    corpus_list = [c.strip() for c in corpora.split(",")]
+    invalid = [c for c in corpus_list if c not in CORPUS_INDICES]
+    if invalid:
+        console.print(f"[red]Unknown corpora: {invalid}[/red]")
+        console.print(f"Available: {list(CORPUS_INDICES.keys())}")
+        raise typer.Exit(1)
+
+    console.print("[bold]Corpus Sweep: Training Data Frequency[/bold]")
+    console.print(f"  Dataset: {hf_dataset}")
+    console.print(f"  Window: {window_size} tokens prefix + {window_size} tokens suffix")
+    console.print(f"  Stride: {stride} tokens")
+    console.print(f"  Corpora: {corpus_list}")
+    console.print()
+
+    # Load dataset
+    console.print("[bold]Loading dataset...[/bold]")
+    ds = load_dataset(hf_dataset, split="train")
+    items = list(ds)
+    if limit:
+        items = items[:limit]
+    console.print(f"  Items: {len(items)}")
+    console.print()
+
+    # We need a tokenizer for sliding windows - use a fast one
+    console.print("[bold]Loading tokenizer...[/bold]")
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B")
+    console.print()
+
+    # Generate sliding windows for each item
+    console.print("[bold]Generating sliding windows...[/bold]")
+    all_windows: list[dict] = []  # Each window with metadata
+
+    for item in tqdm(items, desc="Processing items"):
+        content_id = item.get("content_id", "unknown")
+        content_title = item.get("content_title", "unknown")
+        text = item.get(text_col, "")
+
+        if not text or len(text.strip()) < 50:
+            continue
+
+        # Tokenize
+        tokens = tokenizer.encode(text, add_special_tokens=False)
+
+        # Slide window
+        window_idx = 0
+        pos = 0
+        while pos + window_size * 2 <= len(tokens):
+            prefix_ids = tokens[pos : pos + window_size]
+            suffix_ids = tokens[pos + window_size : pos + window_size * 2]
+
+            prefix = tokenizer.decode(prefix_ids)
+            suffix = tokenizer.decode(suffix_ids)
+
+            all_windows.append({
+                "content_id": content_id,
+                "content_title": content_title,
+                "window_idx": window_idx,
+                "start_token": pos,
+                "prefix": prefix,
+                "suffix": suffix,
+            })
+
+            window_idx += 1
+            pos += stride
+
+            if limit_windows and len(all_windows) >= limit_windows:
+                break
+
+        if limit_windows and len(all_windows) >= limit_windows:
+            break
+
+    console.print(f"  Total windows: {len(all_windows)}")
+    console.print()
+
+    if not all_windows:
+        console.print("[yellow]No windows generated![/yellow]")
+        raise typer.Exit(0)
+
+    # Query infini-gram for each window's suffix
+    console.print("[bold]Querying infini-gram API...[/bold]")
+    console.print(f"  Rate limit: {rate_limit}s between requests")
+    console.print(f"  Estimated time: {len(all_windows) * rate_limit / 60:.1f} minutes")
+    console.print()
+
+    import random
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Sample if requested
+    if sample_rate < 1.0:
+        random.shuffle(all_windows)
+        all_windows = all_windows[:int(len(all_windows) * sample_rate)]
+        console.print(f"  Sampled to: {len(all_windows)} windows")
+
+    def query_single_window(window: dict) -> dict:
+        """Query a single window across all corpora."""
+        freq = query_window(
+            text=window["suffix"],
+            corpora=corpus_list,
+            window_idx=window["window_idx"],
+        )
+
+        corpus_counts = {}
+        for corpus in corpus_list:
+            if corpus in freq.counts:
+                corpus_counts[corpus] = freq.counts[corpus].count
+            else:
+                corpus_counts[corpus] = 0
+
+        return {
+            "content_id": window["content_id"],
+            "content_title": window["content_title"],
+            "window_idx": window["window_idx"],
+            "start_token": window["start_token"],
+            "prefix": window["prefix"],
+            "suffix": window["suffix"],
+            "total_count": freq.total_count,
+            "found_in_any": freq.found_in_any,
+            "top_corpus": freq.top_corpus,
+            "corpus_counts": corpus_counts,
+        }
+
+    records = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(query_single_window, w): w for w in all_windows}
+
+        with tqdm(total=len(all_windows), desc=f"Querying ({workers} workers)") as pbar:
+            for future in as_completed(futures):
+                try:
+                    record = future.result()
+                    records.append(record)
+                except Exception as e:
+                    window = futures[future]
+                    console.print(f"[yellow]Error querying {window['content_id']}: {e}[/yellow]")
+                pbar.update(1)
+
+                # Small delay to avoid overwhelming API
+                if rate_limit > 0:
+                    time.sleep(rate_limit / workers)
+
+    # Save results
+    console.print()
+    console.print("[bold]Saving results...[/bold]")
+    import polars as pl
+    result_df = pl.DataFrame(records)
+    result_df.write_parquet(output)
+    console.print(f"  Saved to: {output}")
+
+    # Summary statistics
+    console.print()
+    console.print("[bold]Summary:[/bold]")
+
+    found_count = sum(1 for r in records if r["found_in_any"])
+    console.print(f"  Windows found in training data: {found_count}/{len(records)} ({found_count/len(records):.1%})")
+
+    # Per-corpus stats
+    console.print()
+    console.print("[bold]Per-corpus statistics:[/bold]")
+    for corpus in corpus_list:
+        counts = [r["corpus_counts"].get(corpus, 0) for r in records]
+        nonzero = sum(1 for c in counts if c > 0)
+        total = sum(counts)
+        console.print(f"  {corpus:12s}: {nonzero:4d} windows ({nonzero/len(records):5.1%}), total count: {format_count(total)}")
+
+    # Group by content
+    console.print()
+    console.print("[bold]Per-item statistics (top 10 by total count):[/bold]")
+    item_counts: dict[str, int] = {}
+    for r in records:
+        cid = r["content_id"]
+        item_counts[cid] = item_counts.get(cid, 0) + r["total_count"]
+
+    sorted_items = sorted(item_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    for cid, count in sorted_items:
+        # Get title
+        title = next((r["content_title"] for r in records if r["content_id"] == cid), cid)
+        console.print(f"  {title[:40]:40s}: {format_count(count)}")
+
+    # Push to HuggingFace
+    if not no_push:
+        repo_name = f"{hf_org}/corpus_sweep_cleanslate_dataset"
+        console.print()
+        console.print(f"[bold]Pushing to HuggingFace: {repo_name}[/bold]")
+        results_ds = Dataset.from_list(records)
+        results_ds.push_to_hub(repo_name, split="train")
+        console.print(f"[green]Pushed to https://huggingface.co/datasets/{repo_name}[/green]")
+
+    console.print()
+    console.print("[green bold]Done![/green bold]")
+
+
 def main():
     """Entry point for CLI."""
     app()

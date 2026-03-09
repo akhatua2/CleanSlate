@@ -14,6 +14,7 @@ venv/
 .mypy_cache/
 .cache/
 .claude/
+corpus_sweep.log
 
 results/
 data/
