@@ -62,6 +62,12 @@ def load_model(
     )
     patch_rope_scaling(model)
 
+    # FSDP requires uniform dtype across all parameters. Some models keep
+    # layer-norm or embedding weights in fp32 despite torch_dtype; force
+    # everything to the requested dtype so FSDP wrapping doesn't fail.
+    if config.distributed_strategy == "fsdp":
+        model.to(torch_dtype)
+
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
