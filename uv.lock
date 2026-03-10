@@ -564,7 +564,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ray", specifier = ">=2.54.0" },
     { name = "rich", marker = "extra == 'cli'" },
-    { name = "sglang", marker = "extra == 'sglang'", specifier = "==0.5.2" },
+    { name = "sglang", marker = "extra == 'sglang'" },
     { name = "torch" },
     { name = "transformers" },
     { name = "typer", marker = "extra == 'cli'" },
