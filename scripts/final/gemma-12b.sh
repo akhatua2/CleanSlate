@@ -6,15 +6,6 @@
 # ============================================================================
 set -euo pipefail
 
-# ── HF / model cache setup ─────────────────────────────────────────────────
-export LOCAL_MACHINE_CACHE="${LOCAL_MACHINE_CACHE:-/lfs/skampere3/0/animjha/.cache}"
-export HF_HOME="$LOCAL_MACHINE_CACHE"
-export HF_HUB_CACHE="$LOCAL_MACHINE_CACHE/hub"
-export HF_DATASETS_CACHE="$LOCAL_MACHINE_CACHE/datasets"
-export TRANSFORMERS_CACHE="$LOCAL_MACHINE_CACHE/transformers"
-export HF_TOKENIZERS_CACHE="$LOCAL_MACHINE_CACHE/tokenizers"
-export VLLM_CACHE_DIR="$LOCAL_MACHINE_CACHE/vllm"
-
 # ── Phase 0: Variables ──────────────────────────────────────────────────────
 ALIAS="gemma-12b"
 MODEL="google/gemma-3-12b-pt"
@@ -64,7 +55,7 @@ echo "[Phase 2] Build pool + curate ..."
 if [[ -f "${POOL_DIR}/pool.parquet" ]]; then
     echo "  SKIP: pool already built"
 else
-    cleanslate fsid build-pool --eval-dataset "$EVAL_DATASET" --threshold 0.30 -o "$POOL_DIR"
+    cleanslate fsid build-pool --eval-dataset "$EVAL_DATASET" --threshold 0.05 -o "$POOL_DIR"
 fi
 if [[ -f "${CURATED_DIR}/forget_set.parquet" ]]; then
     echo "  SKIP: already curated"
@@ -90,7 +81,7 @@ done
 
 # ── Phase 4 ──────────────────────────────────────────────────────────────
 for OBJ in npo simnpo; do
-    if compgen -G "${POST_EVAL_DIR}/${OBJ}/*.parquet" > /dev/null 2>&1; then
+    if compgen -G "${POST_EVAL_DIR}/${OBJ}/*/results.parquet" > /dev/null 2>&1; then
         echo "[Phase 4] SKIP: ${OBJ} post-eval exists"
     else
         CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")

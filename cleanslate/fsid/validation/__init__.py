@@ -74,7 +74,8 @@ def run_validation(
         f"pretrained={model_name},"
         f"mem_fraction_static={mem_fraction},"
         f"tp_size={tp_size},"
-        f"dp_size={dp_size}"
+        f"dp_size={dp_size},"
+        f"log_level=info"
     )
 
     eval_results: dict[str, Any] = lm_eval.simple_evaluate(
