@@ -245,31 +245,98 @@ def evaluate(
         "--judge/--no-judge",
         help="Use LLM judge for answer checking (slower but more accurate)",
     ),
-    dtype: str = typer.Option(
-        "bfloat16",
-        "--dtype",
-        help="Model dtype: bfloat16, float16, float32, auto",
+    mem_fraction: float = typer.Option(
+        0.85,
+        "--mem-fraction",
+        help="GPU memory fraction for SGLang engine",
+    ),
+    tp_size: int = typer.Option(
+        1,
+        "--tp-size",
+        help="Tensor parallel size for multi-GPU",
+    ),
+    num_gpus: int = typer.Option(
+        1,
+        "--num-gpus",
+        "-g",
+        help="Number of GPUs (split across TP and DP automatically)",
+    ),
+    gpu_ids: str | None = typer.Option(
+        None,
+        "--gpu-ids",
+        help="Comma-separated GPU IDs to use (e.g. '2,3,4,5'). Default: 0 to num_gpus-1",
+    ),
+    batch_size: str = typer.Option(
+        "auto",
+        "--batch-size",
+        help="Batch size for evaluation ('auto' or integer)",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "-n",
+        "--limit",
+        help="Limit number of QA pairs (for quick testing)",
+    ),
+    max_judge_workers: int = typer.Option(
+        8,
+        "--max-judge-workers",
+        help="Max parallel threads for LLM judge calls (only used with --judge)",
     ),
 ) -> None:
-    """Evaluate a model on QA benchmark and save per-content results."""
-    from cleanslate.fsid.qa.scoring import (
-        evaluate_qa,
-        load_qa_benchmark,
-        save_qa_eval,
-    )
+    """Evaluate a model on QA benchmark using lm-eval + SGLang."""
+    import os
+
+    from cleanslate.fsid.qa.scoring import evaluate_qa, save_qa_eval
+
+    # Compute dp_size from num_gpus and tp_size
+    if num_gpus % tp_size != 0:
+        console.print(
+            f"[red]Error: --num-gpus ({num_gpus}) must be divisible by --tp-size ({tp_size})[/red]"
+        )
+        raise typer.Exit(1)
+    dp_size = num_gpus // tp_size
+
+    # Set CUDA_VISIBLE_DEVICES for multi-GPU
+    if num_gpus > 1:
+        if gpu_ids:
+            gpus = [int(g.strip()) for g in gpu_ids.split(",")]
+            if len(gpus) != num_gpus:
+                console.print(
+                    f"[red]Error: --gpu-ids has {len(gpus)} GPUs but --num-gpus is {num_gpus}[/red]"
+                )
+                raise typer.Exit(1)
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                str(g) for g in range(num_gpus)
+            )
+
+    # Parse batch_size: allow "auto" or integer string
+    bs: int | str
+    try:
+        bs = int(batch_size)
+    except ValueError:
+        bs = batch_size
 
     console.print(f"[bold]Model:[/bold] {model}")
     console.print(f"[bold]Dataset:[/bold] {hf_dataset} ({hf_config})")
     console.print(f"[bold]Judge:[/bold] {'LLM' if use_judge else 'contains_match only'}")
-
-    qa_pairs = load_qa_benchmark(dataset=hf_dataset, config=hf_config)
-    console.print(f"[bold]QA pairs:[/bold] {len(qa_pairs)}")
+    if tp_size > 1:
+        console.print(f"[bold]TP size:[/bold] {tp_size}")
+    if dp_size > 1:
+        console.print(f"[bold]DP size:[/bold] {dp_size}")
 
     summary = evaluate_qa(
         model_name=model,
-        qa_pairs=qa_pairs,
+        dataset=hf_dataset,
+        config=hf_config,
         use_judge=use_judge,
-        dtype=dtype,
+        max_judge_workers=max_judge_workers,
+        mem_fraction=mem_fraction,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        batch_size=bs,
+        limit=limit,
     )
 
     out = save_qa_eval(summary, output)

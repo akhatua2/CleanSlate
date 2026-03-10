@@ -379,16 +379,16 @@ ds = load_dataset("unlearning-cleanslate/cleanslate_dataset", "qa_benchmark")
 ### Running with lm-eval
 
 ```bash
-# Evaluate a model on the QA benchmark
+# Evaluate a model on the QA benchmark (HF backend)
 lm_eval --model hf \
     --model_args pretrained=allenai/Olmo-3-1025-7B,dtype=bfloat16 \
     --tasks cleanslate_qa \
     --include_path cleanslate/fsid/qa/tasks \
     --batch_size 16
 
-# With vLLM backend (faster)
-lm_eval --model vllm \
-    --model_args pretrained=allenai/Olmo-3-1025-7B,dtype=bfloat16 \
+# With SGLang backend (faster)
+lm_eval --model sglang \
+    --model_args pretrained=allenai/Olmo-3-1025-7B,mem_fraction_static=0.85 \
     --tasks cleanslate_qa \
     --include_path cleanslate/fsid/qa/tasks \
     --batch_size auto
@@ -441,7 +441,7 @@ QA pairs must be:
 
 ### QA Evaluation & Scoring
 
-Evaluate a model's QA accuracy and score forget/retain splits — independent of lm-eval:
+Evaluate a model's QA accuracy and score forget/retain splits using lm-eval with the SGLang backend:
 
 ```bash
 # Evaluate pre-unlearning model
@@ -460,6 +460,20 @@ cleanslate fsid qa eval \
   --judge \
   -o results/fsid/qa_post.json
 
+# Quick test with limited samples and no LLM judge
+cleanslate fsid qa eval \
+  -m allenai/Olmo-3-1025-7B \
+  --no-judge \
+  -n 50 \
+  -o results/fsid/qa_quick.json
+
+# Multi-GPU evaluation
+cleanslate fsid qa eval \
+  -m allenai/Olmo-3-1025-7B \
+  --judge \
+  -g 4 --tp-size 2 \
+  -o results/fsid/qa_pre.json
+
 # Score: compare forget vs retain QA accuracy change
 cleanslate fsid qa score \
   --forget-path data/fsid/curated/baseline/olmo7b/forget_set.parquet \
@@ -468,6 +482,20 @@ cleanslate fsid qa score \
   -o results/fsid/qa_score.json
 ```
 
-`qa eval` generates answers using the model and checks correctness via an LLM judge (Gemini). Use `--no-judge` for fast contains-match only.
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-m`, `--model` | required | Model path or HuggingFace name |
+| `-d`, `--dataset` | `unlearning-cleanslate/cleanslate_dataset` | HuggingFace dataset ID |
+| `-c`, `--config` | `qa_benchmark` | Dataset config name |
+| `--judge/--no-judge` | `--judge` | Enable parallel LLM judge (Gemini) for samples that don't pass `contains_match`. `--no-judge` uses `contains_match` only |
+| `--max-judge-workers` | 32 | Max parallel threads for LLM judge API calls |
+| `--mem-fraction` | 0.85 | GPU memory fraction for SGLang engine |
+| `--tp-size` | 1 | Tensor parallel size |
+| `-g`, `--num-gpus` | 1 | Number of GPUs (split across TP and DP) |
+| `--gpu-ids` | None | Comma-separated GPU IDs |
+| `--batch-size` | `auto` | Batch size (`auto` or integer) |
+| `-n`, `--limit` | None | Limit number of QA pairs (for quick testing) |
+
+`qa eval` runs the `cleanslate_qa_fast` lm-eval task (SGLang backend) to generate answers and compute `exact_match` + `contains_match` per sample. When `--judge` is enabled (default), samples that didn't pass `contains_match` are sent to the Gemini LLM judge in parallel (`--max-judge-workers` threads). Per-sample output includes all three metric scores (`exact_match`, `contains_match`, `llm_judge_match`) and the model's prediction.
 
 `qa score` splits QA results by forget/retain content and reports per-subset accuracy deltas. After unlearning, forget-set QA accuracy should ideally stay the same (knowledge retention), while p_z should drop (verbatim memorization removed)

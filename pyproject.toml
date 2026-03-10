@@ -16,10 +16,12 @@ dependencies = [
     "datasets>=4.5.0",
     "pyyaml>=6.0",
     "pydantic>=2.12.5",
-    "mypy>=1.19.1",
     "ray>=2.54.0",
-    "vllm>=0.17.0",
     "litellm>=1.82.0",
+    "pybase64>=1.4.3",
+    "pillow>=12.1.1",
+    "uvloop>=0.22.1",
+    "fastapi>=0.135.1",
 ]
 
 [project.optional-dependencies]

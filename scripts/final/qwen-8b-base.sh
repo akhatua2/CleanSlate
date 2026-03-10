@@ -28,6 +28,13 @@ UNLEARN_DIR="results/final/unlearnt_models/${ALIAS}"
 POST_EVAL_DIR="results/final/post_eval/${ALIAS}"
 SCORE_DIR="results/final/score/${ALIAS}"
 
+# Resolve actual checkpoint path (trainer saves to a timestamped subfolder)
+find_checkpoint() {
+    local match
+    match=$(ls -t "$1"/*/config.json 2>/dev/null | head -1)
+    if [[ -n "$match" ]]; then dirname "$match"; fi
+}
+
 # ── Local mode ──────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--local" ]]; then
     GPU_IDS="${2:?Usage: $0 --local <gpu_ids>}"
@@ -58,7 +65,7 @@ if [[ "${1:-}" == "--local" ]]; then
 
     # Phase 3
     for OBJ in npo simnpo; do
-        if [[ -f "${UNLEARN_DIR}/${OBJ}/config.json" ]]; then echo "[Phase 3] SKIP: ${OBJ} checkpoint exists"
+        if [[ -n "$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")" ]]; then echo "[Phase 3] SKIP: ${OBJ} checkpoint exists"
         else
             echo "[Phase 3] Training ${OBJ} ..."
             CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid train \
@@ -73,15 +80,16 @@ if [[ "${1:-}" == "--local" ]]; then
     for OBJ in npo simnpo; do
         if compgen -G "${POST_EVAL_DIR}/${OBJ}/*.parquet" > /dev/null 2>&1; then echo "[Phase 4] SKIP: ${OBJ} post-eval exists"
         else
-            echo "[Phase 4] Post-eval ${OBJ} (tp=2) ..."
-            cleanslate eval -d "$EVAL_DATASET" -c default -m "${UNLEARN_DIR}/${OBJ}" \
+            CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
+            echo "[Phase 4] Post-eval ${OBJ} (tp=2) — checkpoint: ${CKPT} ..."
+            cleanslate eval -d "$EVAL_DATASET" -c default -m "$CKPT" \
                 --tp-size 2 --num-gpus 2 --gpu-ids "$FIRST_TWO" -o "${POST_EVAL_DIR}/${OBJ}" --no-push
         fi
     done
 
     # Phase 5
     for OBJ in npo simnpo; do
-        CKPT="${UNLEARN_DIR}/${OBJ}"
+        CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
         if [[ -f "${VAL_DIR}/post_${OBJ}_gsm8k.json" ]]; then echo "[Phase 5] SKIP: post_${OBJ}_gsm8k.json exists"
         else CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid validate \
             -m "$CKPT" -B gsm8k -o "${VAL_DIR}/post_${OBJ}_gsm8k.json" --num-gpus 1 --mem-fraction 0.80; fi
@@ -131,7 +139,7 @@ JOB_B=$(sbatch --parsable \
     --wrap="
 set -euo pipefail
 cd $PROJECT_DIR
-[[ -f ${UNLEARN_DIR}/npo/config.json ]] || cleanslate fsid train --config cleanslate/fsid/configs/npo.yaml \
+ls ${UNLEARN_DIR}/npo/*/config.json &>/dev/null || cleanslate fsid train --config cleanslate/fsid/configs/npo.yaml \
     -m $MODEL --forget-path ${CURATED_DIR}/forget_set.parquet \
     --retain-path ${CURATED_DIR}/retain_set.parquet \
     -o ${UNLEARN_DIR}/npo --batch-size 16 --grad-accum 2 --epochs 1
@@ -145,7 +153,7 @@ JOB_C=$(sbatch --parsable \
     --wrap="
 set -euo pipefail
 cd $PROJECT_DIR
-[[ -f ${UNLEARN_DIR}/simnpo/config.json ]] || cleanslate fsid train --config cleanslate/fsid/configs/simnpo.yaml \
+ls ${UNLEARN_DIR}/simnpo/*/config.json &>/dev/null || cleanslate fsid train --config cleanslate/fsid/configs/simnpo.yaml \
     -m $MODEL --forget-path ${CURATED_DIR}/forget_set.parquet \
     --retain-path ${CURATED_DIR}/retain_set.parquet \
     -o ${UNLEARN_DIR}/simnpo --batch-size 16 --grad-accum 2 --epochs 1
@@ -159,11 +167,12 @@ JOB_D=$(sbatch --parsable \
     --wrap="
 set -euo pipefail
 cd $PROJECT_DIR
-compgen -G '${POST_EVAL_DIR}/npo/*.parquet' > /dev/null 2>&1 || cleanslate eval -d $EVAL_DATASET -c default -m ${UNLEARN_DIR}/npo \
+CKPT=\$(dirname \"\$(ls -t ${UNLEARN_DIR}/npo/*/config.json 2>/dev/null | head -1)\")
+compgen -G '${POST_EVAL_DIR}/npo/*.parquet' > /dev/null 2>&1 || cleanslate eval -d $EVAL_DATASET -c default -m \$CKPT \
     --tp-size 2 --num-gpus 2 -o ${POST_EVAL_DIR}/npo --no-push
-[[ -f ${VAL_DIR}/post_npo_gsm8k.json ]] || cleanslate fsid validate -m ${UNLEARN_DIR}/npo -B gsm8k \
+[[ -f ${VAL_DIR}/post_npo_gsm8k.json ]] || cleanslate fsid validate -m \$CKPT -B gsm8k \
     -o ${VAL_DIR}/post_npo_gsm8k.json --num-gpus 1 --mem-fraction 0.80
-[[ -f ${VAL_DIR}/post_npo_qa.json ]] || cleanslate fsid qa eval -m ${UNLEARN_DIR}/npo -o ${VAL_DIR}/post_npo_qa.json
+[[ -f ${VAL_DIR}/post_npo_qa.json ]] || cleanslate fsid qa eval -m \$CKPT -o ${VAL_DIR}/post_npo_qa.json
 ")
 echo "  Job D (post-eval NPO):   ${JOB_D}  (after ${JOB_B})"
 
@@ -174,11 +183,12 @@ JOB_E=$(sbatch --parsable \
     --wrap="
 set -euo pipefail
 cd $PROJECT_DIR
-compgen -G '${POST_EVAL_DIR}/simnpo/*.parquet' > /dev/null 2>&1 || cleanslate eval -d $EVAL_DATASET -c default -m ${UNLEARN_DIR}/simnpo \
+CKPT=\$(dirname \"\$(ls -t ${UNLEARN_DIR}/simnpo/*/config.json 2>/dev/null | head -1)\")
+compgen -G '${POST_EVAL_DIR}/simnpo/*.parquet' > /dev/null 2>&1 || cleanslate eval -d $EVAL_DATASET -c default -m \$CKPT \
     --tp-size 2 --num-gpus 2 -o ${POST_EVAL_DIR}/simnpo --no-push
-[[ -f ${VAL_DIR}/post_simnpo_gsm8k.json ]] || cleanslate fsid validate -m ${UNLEARN_DIR}/simnpo -B gsm8k \
+[[ -f ${VAL_DIR}/post_simnpo_gsm8k.json ]] || cleanslate fsid validate -m \$CKPT -B gsm8k \
     -o ${VAL_DIR}/post_simnpo_gsm8k.json --num-gpus 1 --mem-fraction 0.80
-[[ -f ${VAL_DIR}/post_simnpo_qa.json ]] || cleanslate fsid qa eval -m ${UNLEARN_DIR}/simnpo -o ${VAL_DIR}/post_simnpo_qa.json
+[[ -f ${VAL_DIR}/post_simnpo_qa.json ]] || cleanslate fsid qa eval -m \$CKPT -o ${VAL_DIR}/post_simnpo_qa.json
 ")
 echo "  Job E (post-eval SimNPO): ${JOB_E}  (after ${JOB_C})"
 

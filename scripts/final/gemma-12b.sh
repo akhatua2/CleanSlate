@@ -35,6 +35,13 @@ SCORE_DIR="results/final/score/${ALIAS}"
 mkdir -p "$POOL_DIR" "$CURATED_DIR" "$VAL_DIR" "$UNLEARN_DIR" \
          "$POST_EVAL_DIR" "$SCORE_DIR"
 
+# Resolve actual checkpoint path (trainer saves to a timestamped subfolder)
+find_checkpoint() {
+    local match
+    match=$(ls -t "$1"/*/config.json 2>/dev/null | head -1)
+    if [[ -n "$match" ]]; then dirname "$match"; fi
+}
+
 echo "=== ${ALIAS} pipeline  |  GPUs: ${GPU_IDS}  |  $(date) ==="
 
 # ── Phase 1 ──────────────────────────────────────────────────────────────
@@ -67,7 +74,7 @@ fi
 
 # ── Phase 3 ──────────────────────────────────────────────────────────────
 for OBJ in npo simnpo; do
-    if [[ -f "${UNLEARN_DIR}/${OBJ}/config.json" ]]; then
+    if [[ -n "$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")" ]]; then
         echo "[Phase 3] SKIP: ${OBJ} checkpoint exists"
     else
         echo "[Phase 3] Training ${OBJ} ..."
@@ -86,9 +93,10 @@ for OBJ in npo simnpo; do
     if compgen -G "${POST_EVAL_DIR}/${OBJ}/*.parquet" > /dev/null 2>&1; then
         echo "[Phase 4] SKIP: ${OBJ} post-eval exists"
     else
-        echo "[Phase 4] Post-eval ${OBJ} (tp=2) ..."
+        CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
+        echo "[Phase 4] Post-eval ${OBJ} (tp=2) — checkpoint: ${CKPT} ..."
         cleanslate eval -d "$EVAL_DATASET" -c default \
-            -m "${UNLEARN_DIR}/${OBJ}" \
+            -m "$CKPT" \
             --tp-size 2 --num-gpus 2 --gpu-ids "$FIRST_TWO" \
             -o "${POST_EVAL_DIR}/${OBJ}" --no-push
     fi
@@ -96,7 +104,7 @@ done
 
 # ── Phase 5 ──────────────────────────────────────────────────────────────
 for OBJ in npo simnpo; do
-    CKPT="${UNLEARN_DIR}/${OBJ}"
+    CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
     if [[ -f "${VAL_DIR}/post_${OBJ}_gsm8k.json" ]]; then
         echo "[Phase 5] SKIP: post_${OBJ}_gsm8k.json exists"
     else
