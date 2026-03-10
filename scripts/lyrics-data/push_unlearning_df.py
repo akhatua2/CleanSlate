@@ -1,4 +1,7 @@
-"""Push local FSID artifacts from final pipeline to Hugging Face dataset repos."""
+"""Push local FSID artifacts from final pipeline to Hugging Face dataset repos.
+
+All artifacts use threshold=0.05 and SimNPO objective.
+"""
 
 import argparse
 import json
@@ -9,13 +12,9 @@ from datasets import Dataset
 from huggingface_hub import HfApi
 
 
-ROOT = Path("/lfs/skampere3/0/animjha/CleanSlate")
+ROOT = Path("/data/animesh_jha/CleanSlate")
 
 ALL_ALIASES = [
-    "olmo-32b",
-    "gpt-oss-20b",
-    "gemma-12b",
-    "nemotron-9b",
     "olmo-7b",
     "llama-8b",
     "qwen-8b",
@@ -29,13 +28,16 @@ HF_ORG = "unlearning-cleanslate"
 def _model_paths(alias: str) -> dict[str, Path]:
     """Derive all artifact paths for a model alias from the final pipeline layout."""
     return {
-        # Pool artifacts
+        # Pool artifacts (threshold=0.05)
         "pool": ROOT / f"data/final/{alias}/pool/pool.parquet",
         "forget_pool": ROOT / f"data/final/{alias}/pool/forget.parquet",
         "retain_pool": ROOT / f"data/final/{alias}/pool/retain.parquet",
         # Curated sets
         "forget_set": ROOT / f"data/final/curated/{alias}/baseline/forget_set.parquet",
         "retain_set": ROOT / f"data/final/curated/{alias}/baseline/retain_set.parquet",
+        "requests": ROOT / f"data/final/curated/{alias}/baseline/requests.parquet",
+        # Post-eval results (SimNPO)
+        "post_eval_simnpo": ROOT / f"results/final/post_eval/{alias}/simnpo/default/results.parquet",
     }
 
 
@@ -46,17 +48,13 @@ def _json_paths(alias: str) -> dict[str, Path]:
     curated = ROOT / f"data/final/curated/{alias}/baseline"
     return {
         "metadata": curated / "metadata.json",
-        # Scores
-        "npo_score": score / "npo_score.json",
+        # Scores (SimNPO only)
         "simnpo_score": score / "simnpo_score.json",
-        "npo_qa_score": score / "npo_qa_score.json",
         "simnpo_qa_score": score / "simnpo_qa_score.json",
         # Validation
         "pre_gsm8k": val / "pre_gsm8k.json",
         "pre_qa": val / "pre_qa.json",
-        "post_npo_gsm8k": val / "post_npo_gsm8k.json",
         "post_simnpo_gsm8k": val / "post_simnpo_gsm8k.json",
-        "post_npo_qa": val / "post_npo_qa.json",
         "post_simnpo_qa": val / "post_simnpo_qa.json",
     }
 
@@ -70,6 +68,7 @@ def push_model_artifacts(
     alias: str,
     *,
     dry_run: bool,
+    token: str | None = None,
 ) -> None:
     repo_id = f"{HF_ORG}/fsid_{alias}"
     parquet_paths = _model_paths(alias)
@@ -93,10 +92,11 @@ def push_model_artifacts(
             config_name=config_name,
             split="train",
             private=False,
+            token=token,
         )
 
     # Upload JSON files (scores, validation, metadata)
-    api = HfApi()
+    api = HfApi(token=token)
     for name, local_path in json_paths.items():
         if not local_path.exists():
             print(f"  SKIP {name}: {local_path} not found")
@@ -123,7 +123,7 @@ def parse_args() -> argparse.Namespace:
         choices=ALL_ALIASES,
         action="append",
         dest="models",
-        help="Model alias(es) to push. Default: all 9 models.",
+        help="Model alias(es) to push. Default: all 5 models.",
     )
     parser.add_argument(
         "--dry-run",
@@ -134,11 +134,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    import os
+
     args = parse_args()
     selected = args.models or ALL_ALIASES
+    token = os.environ.get("HF_TOKEN")
 
     for alias in selected:
-        push_model_artifacts(alias, dry_run=args.dry_run)
+        push_model_artifacts(alias, dry_run=args.dry_run, token=token)
 
 
 if __name__ == "__main__":
