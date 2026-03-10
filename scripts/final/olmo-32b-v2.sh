@@ -15,7 +15,7 @@ IFS=',' read -ra GPUS <<< "$GPU_IDS"
 NUM_GPUS=${#GPUS[@]}
 FIRST_GPU="${GPUS[0]}"
 
-CURATED_DIR="data/final/curated/${ALIAS}/baseline"
+CURATED_DIR="data/final/curated/${ALIAS}/baseline_t030"
 VAL_DIR="results/final/validation/${ALIAS}"
 UNLEARN_DIR="results/final/unlearnt_models/${ALIAS}/simnpo_v2_t030"
 POST_EVAL_DIR="results/final/post_eval/${ALIAS}/simnpo_v2"
@@ -39,7 +39,7 @@ else
     CUDA_VISIBLE_DEVICES="$GPU_IDS" accelerate launch \
         --num_processes "$NUM_GPUS" \
         -m cleanslate fsid train \
-        --config cleanslate/fsid/configs/simnpo_aggressive.yaml \
+        --config cleanslate/fsid/configs/simnpo.yaml \
         -m "$MODEL" \
         --forget-path "${CURATED_DIR}/forget_set.parquet" \
         --retain-path "${CURATED_DIR}/retain_set.parquet" \

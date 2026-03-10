@@ -6,6 +6,8 @@
 # ============================================================================
 set -euo pipefail
 
+export HF_MODULES_CACHE="/lfs/skampere3/0/animjha/.hf_modules"
+
 # ── Phase 0: Variables ──────────────────────────────────────────────────────
 ALIAS="nemotron-9b"
 MODEL="nvidia/NVIDIA-Nemotron-Nano-9B-v2"
@@ -41,7 +43,8 @@ if [[ -f "${VAL_DIR}/pre_gsm8k.json" ]]; then
     echo "  SKIP: pre_gsm8k.json exists"
 else
     CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid validate \
-        -m "$MODEL" -B gsm8k -o "${VAL_DIR}/pre_gsm8k.json" --num-gpus 1 --mem-fraction 0.80
+        -m "$MODEL" -B gsm8k -o "${VAL_DIR}/pre_gsm8k.json" \
+        --num-gpus 1 --mem-fraction 0.60
 fi
 if [[ -f "${VAL_DIR}/pre_qa.json" ]]; then
     echo "  SKIP: pre_qa.json exists"
@@ -64,44 +67,46 @@ else
 fi
 
 # ── Phase 3 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     if [[ -n "$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")" ]]; then
         echo "[Phase 3] SKIP: ${OBJ} checkpoint exists"
     else
         echo "[Phase 3] Training ${OBJ} ..."
         CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid train \
-            --config "cleanslate/fsid/configs/${OBJ}.yaml" \
+            --config "cleanslate/fsid/configs/simnpo.yaml" \
             -m "$MODEL" \
             --forget-path "${CURATED_DIR}/forget_set.parquet" \
             --retain-path "${CURATED_DIR}/retain_set.parquet" \
             -o "${UNLEARN_DIR}/${OBJ}" \
-            --batch-size 16 --grad-accum 2 --epochs 1
+            --gradient-checkpointing \
+            --batch-size 1 --grad-accum 8 --epochs 5
     fi
 done
 
 # ── Phase 4 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     if compgen -G "${POST_EVAL_DIR}/${OBJ}/*/results.parquet" > /dev/null 2>&1; then
         echo "[Phase 4] SKIP: ${OBJ} post-eval exists"
     else
         CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
-        echo "[Phase 4] Post-eval ${OBJ} (tp=2) — checkpoint: ${CKPT} ..."
-        cleanslate eval -d "$EVAL_DATASET" -c default \
+        echo "[Phase 4] Post-eval ${OBJ} — checkpoint: ${CKPT} ..."
+        CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate eval -d "$EVAL_DATASET" -c default \
             -m "$CKPT" \
-            --tp-size 2 --num-gpus 2 --gpu-ids "$FIRST_TWO" \
+            --num-gpus 1 \
             -o "${POST_EVAL_DIR}/${OBJ}" --no-push
     fi
 done
 
 # ── Phase 5 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
     if [[ -f "${VAL_DIR}/post_${OBJ}_gsm8k.json" ]]; then
         echo "[Phase 5] SKIP: post_${OBJ}_gsm8k.json exists"
     else
         echo "[Phase 5] Post-validation ${OBJ} gsm8k ..."
         CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid validate \
-            -m "$CKPT" -B gsm8k -o "${VAL_DIR}/post_${OBJ}_gsm8k.json" --num-gpus 1 --mem-fraction 0.80
+            -m "$CKPT" -B gsm8k -o "${VAL_DIR}/post_${OBJ}_gsm8k.json" \
+            --num-gpus 1 --mem-fraction 0.60
     fi
     if [[ -f "${VAL_DIR}/post_${OBJ}_qa.json" ]]; then
         echo "[Phase 5] SKIP: post_${OBJ}_qa.json exists"
@@ -112,7 +117,7 @@ for OBJ in npo simnpo; do
 done
 
 # ── Phase 6 (always rerun) ──────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     echo "[Phase 6] Scoring ${OBJ} ..."
     cleanslate fsid score \
         --forget-path "${CURATED_DIR}/forget_set.parquet" \

@@ -64,7 +64,7 @@ else
 fi
 
 # ── Phase 3 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     if [[ -n "$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")" ]]; then
         echo "[Phase 3] SKIP: ${OBJ} checkpoint exists"
     else
@@ -80,7 +80,7 @@ for OBJ in npo simnpo; do
 done
 
 # ── Phase 4 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     if compgen -G "${POST_EVAL_DIR}/${OBJ}/*/results.parquet" > /dev/null 2>&1; then
         echo "[Phase 4] SKIP: ${OBJ} post-eval exists"
     else
@@ -94,7 +94,7 @@ for OBJ in npo simnpo; do
 done
 
 # ── Phase 5 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
     if [[ -f "${VAL_DIR}/post_${OBJ}_gsm8k.json" ]]; then
         echo "[Phase 5] SKIP: post_${OBJ}_gsm8k.json exists"
@@ -112,7 +112,7 @@ for OBJ in npo simnpo; do
 done
 
 # ── Phase 6 (always rerun) ──────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     echo "[Phase 6] Scoring ${OBJ} ..."
     cleanslate fsid score \
         --forget-path "${CURATED_DIR}/forget_set.parquet" \
