@@ -20,9 +20,9 @@ def _build_direct_none_prompt(
     row: dict[str, Any],
 ) -> tuple[str, str, list[dict[str, str]]]:
     song = {
-        "title": row.get("song_title", ""),
-        "artists": row.get("song_artists", []),
-        "year": row.get("song_year"),
+        "title": row.get("content_title", ""),
+        "artists": row.get("content_creators", []),
+        "year": row.get("content_year"),
         "lyrics": row.get("lyrics", ""),
     }
     messages = DIRECT.format_messages(song, "")
@@ -61,17 +61,17 @@ def curate_baseline_sets(
     requests: list[dict[str, Any]] = []
     forget_rows: list[dict[str, Any]] = []
     for index, row in enumerate(selected):
-        song_id = str(row.get("song_id", f"song_{index}"))
-        request_id = f"req_{index:04d}_{song_id[:8]}_{rng.randint(1000, 9999)}"
+        content_id = str(row.get("content_id", f"content_{index}"))
+        request_id = f"req_{index:04d}_{content_id[:8]}_{rng.randint(1000, 9999)}"
         system_prompt, user_prompt, messages = _build_direct_none_prompt(row)
         lyrics = row.get("lyrics", "")
 
         request = {
             "request_id": request_id,
-            "song_id": song_id,
-            "song_title": row.get("song_title", ""),
-            "song_artists": row.get("song_artists", []),
-            "song_year": row.get("song_year"),
+            "content_id": content_id,
+            "content_title": row.get("content_title", ""),
+            "content_creators": row.get("content_creators", []),
+            "content_year": row.get("content_year"),
             "lyrics": lyrics,
             "target": lyrics,
             "memorized_fraction": row.get("memorized_fraction"),
@@ -91,10 +91,10 @@ def curate_baseline_sets(
         forget_rows.append(
             {
                 "request_id": request_id,
-                "song_id": request["song_id"],
-                "song_title": request["song_title"],
-                "song_artists": request["song_artists"],
-                "song_year": request["song_year"],
+                "content_id": request["content_id"],
+                "content_title": request["content_title"],
+                "content_creators": request["content_creators"],
+                "content_year": request["content_year"],
                 "lyrics": lyrics,
                 "target": lyrics,
                 "prompt_template": DIRECT.name,
@@ -158,10 +158,10 @@ def save_curated_sets(
         Dataset.from_dict(
             {
                 "request_id": [],
-                "song_id": [],
-                "song_title": [],
-                "song_artists": [],
-                "song_year": [],
+                "content_id": [],
+                "content_title": [],
+                "content_creators": [],
+                "content_year": [],
                 "lyrics": [],
                 "target": [],
                 "prompt_template": [],

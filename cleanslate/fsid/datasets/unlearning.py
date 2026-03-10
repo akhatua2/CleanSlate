@@ -104,7 +104,7 @@ def build_forget_pairs(
                 {
                     "input_ids": input_ids,
                     "seed_len": seed_len,
-                    "song_id": row.get("song_id", ""),
+                    "content_id": row.get("content_id", ""),
                     "request_id": row.get("request_id", ""),
                 }
             )

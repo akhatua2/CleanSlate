@@ -1,6 +1,7 @@
-"""Push local FSID request/set artifacts to Hugging Face dataset repos."""
+"""Push local FSID artifacts from final pipeline to Hugging Face dataset repos."""
 
 import argparse
+import json
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -8,94 +9,121 @@ from datasets import Dataset
 from huggingface_hub import HfApi
 
 
-ROOT = Path("/lfs/skampere2/0/animjha/CleanSlate")
+ROOT = Path("/lfs/skampere3/0/animjha/CleanSlate")
 
-MODEL_ARTIFACTS: dict[str, dict[str, object]] = {
-    "olmo7b": {
-        "repo_id": "unlearning-cleanslate/olmo7B_pool_mem_frac_gt_0.10",
-        "artifacts": {
-            "pool_requests": ROOT / "data/fsid/olmo7b/pool.parquet",
-            "forget_requests": ROOT / "data/fsid/olmo7b/forget.parquet",
-            "retain_requests": ROOT / "data/fsid/olmo7b/retain.parquet",
-            "forget_set": ROOT / "data/fsid/curated/baseline/olmo7b/forget_set.parquet",
-            "retain_set": ROOT / "data/fsid/curated/baseline/olmo7b/retain_set.parquet",
-        },
-        "metadata_path": ROOT / "data/fsid/curated/baseline/olmo7b/metadata.json",
-    },
-    "olmo32b": {
-        "repo_id": "unlearning-cleanslate/olmo32B_pool_mem_frac_gt_0.10",
-        "artifacts": {
-            "pool_requests": ROOT / "data/fsid/olmo32b/pool.parquet",
-            "forget_requests": ROOT / "data/fsid/olmo32b/forget.parquet",
-            "retain_requests": ROOT / "data/fsid/olmo32b/retain.parquet",
-            "forget_set": ROOT
-            / "data/fsid/curated/baseline/olmo32b/forget_set.parquet",
-            "retain_set": ROOT
-            / "data/fsid/curated/baseline/olmo32b/retain_set.parquet",
-        },
-        "metadata_path": ROOT / "data/fsid/curated/baseline/olmo32b/metadata.json",
-    },
-}
+ALL_ALIASES = [
+    "olmo-32b",
+    "gpt-oss-20b",
+    "gemma-12b",
+    "nemotron-9b",
+    "olmo-7b",
+    "llama-8b",
+    "qwen-8b",
+    "qwen-8b-base",
+    "trinity-nano",
+]
+
+HF_ORG = "unlearning-cleanslate"
 
 
-def _load_local_parquet(path: Path):
+def _model_paths(alias: str) -> dict[str, Path]:
+    """Derive all artifact paths for a model alias from the final pipeline layout."""
+    return {
+        # Pool artifacts
+        "pool": ROOT / f"data/final/{alias}/pool/pool.parquet",
+        "forget_pool": ROOT / f"data/final/{alias}/pool/forget.parquet",
+        "retain_pool": ROOT / f"data/final/{alias}/pool/retain.parquet",
+        # Curated sets
+        "forget_set": ROOT / f"data/final/curated/{alias}/baseline/forget_set.parquet",
+        "retain_set": ROOT / f"data/final/curated/{alias}/baseline/retain_set.parquet",
+    }
+
+
+def _json_paths(alias: str) -> dict[str, Path]:
+    """Derive JSON artifact paths (metadata, scores, validation)."""
+    score = ROOT / f"results/final/score/{alias}"
+    val = ROOT / f"results/final/validation/{alias}"
+    curated = ROOT / f"data/final/curated/{alias}/baseline"
+    return {
+        "metadata": curated / "metadata.json",
+        # Scores
+        "npo_score": score / "npo_score.json",
+        "simnpo_score": score / "simnpo_score.json",
+        "npo_qa_score": score / "npo_qa_score.json",
+        "simnpo_qa_score": score / "simnpo_qa_score.json",
+        # Validation
+        "pre_gsm8k": val / "pre_gsm8k.json",
+        "pre_qa": val / "pre_qa.json",
+        "post_npo_gsm8k": val / "post_npo_gsm8k.json",
+        "post_simnpo_gsm8k": val / "post_simnpo_gsm8k.json",
+        "post_npo_qa": val / "post_npo_qa.json",
+        "post_simnpo_qa": val / "post_simnpo_qa.json",
+    }
+
+
+def _load_local_parquet(path: Path) -> Dataset:
     table = pq.read_table(path)
     return Dataset(table.replace_schema_metadata(None))
 
 
 def push_model_artifacts(
+    alias: str,
     *,
-    model_name: str,
-    repo_id: str,
-    artifact_paths: dict[str, Path],
-    metadata_path: Path,
     dry_run: bool,
 ) -> None:
-    print(f"\n[{model_name}] repo={repo_id}")
+    repo_id = f"{HF_ORG}/fsid_{alias}"
+    parquet_paths = _model_paths(alias)
+    json_paths = _json_paths(alias)
 
-    for artifact_name, local_path in artifact_paths.items():
+    print(f"\n[{alias}] repo={repo_id}")
+
+    # Push parquet artifacts as HF dataset configs
+    for config_name, local_path in parquet_paths.items():
         if not local_path.exists():
-            raise FileNotFoundError(
-                f"Missing required artifact for {model_name}: {local_path}"
-            )
+            print(f"  SKIP {config_name}: {local_path} not found")
+            continue
 
         dataset = _load_local_parquet(local_path)
-        print(
-            f"  config={artifact_name} split=train rows={len(dataset)} path={local_path}"
-        )
+        print(f"  config={config_name}  rows={len(dataset)}  path={local_path}")
         if dry_run:
             continue
 
         dataset.push_to_hub(
             repo_id,
-            config_name=artifact_name,
+            config_name=config_name,
             split="train",
             private=False,
         )
 
-    if metadata_path.exists():
-        print(f"  metadata={metadata_path}")
-        if not dry_run:
-            HfApi().upload_file(
-                path_or_fileobj=str(metadata_path),
-                path_in_repo="metadata.json",
-                repo_id=repo_id,
-                repo_type="dataset",
-            )
-    else:
-        print(f"  metadata missing, skipping: {metadata_path}")
+    # Upload JSON files (scores, validation, metadata)
+    api = HfApi()
+    for name, local_path in json_paths.items():
+        if not local_path.exists():
+            print(f"  SKIP {name}: {local_path} not found")
+            continue
+
+        print(f"  json={name}  path={local_path}")
+        if dry_run:
+            continue
+
+        api.upload_file(
+            path_or_fileobj=str(local_path),
+            path_in_repo=f"{name}.json",
+            repo_id=repo_id,
+            repo_type="dataset",
+        )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Push local FSID request/set artifacts to Hugging Face."
+        description="Push final pipeline FSID artifacts to Hugging Face."
     )
     parser.add_argument(
         "--model",
-        choices=sorted(MODEL_ARTIFACTS),
+        choices=ALL_ALIASES,
         action="append",
         dest="models",
-        help="Model bundle(s) to push. Default: all configured bundles.",
+        help="Model alias(es) to push. Default: all 9 models.",
     )
     parser.add_argument(
         "--dry-run",
@@ -107,17 +135,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    selected_models = args.models or sorted(MODEL_ARTIFACTS)
+    selected = args.models or ALL_ALIASES
 
-    for model_name in selected_models:
-        config = MODEL_ARTIFACTS[model_name]
-        push_model_artifacts(
-            model_name=model_name,
-            repo_id=str(config["repo_id"]),
-            artifact_paths=dict(config["artifacts"]),
-            metadata_path=Path(config["metadata_path"]),
-            dry_run=args.dry_run,
-        )
+    for alias in selected:
+        push_model_artifacts(alias, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

@@ -151,8 +151,8 @@ def stratified_select(
     elif len(selected) < target_size:
         selected_keys = {
             (
-                str(record.get("song_id", "")),
-                str(record.get("song_title", "")),
+                str(record.get("content_id", "")),
+                str(record.get("content_title", "")),
                 float(record.get(value_key, 0.0)),
             )
             for record in selected
@@ -161,8 +161,8 @@ def stratified_select(
         for bin_id in ordered_bins:
             for row in grouped[bin_id]:
                 row_key = (
-                    str(row.get("song_id", "")),
-                    str(row.get("song_title", "")),
+                    str(row.get("content_id", "")),
+                    str(row.get("content_title", "")),
                     float(row.get(value_key, 0.0)),
                 )
                 if row_key not in selected_keys:
@@ -175,20 +175,20 @@ def stratified_select(
 
 def load_lyrics_dataset():
     return load_dataset(
-        "unlearning-cleanslate/songs_5000", "default", split="train"
+        "unlearning-cleanslate/cleanslate_dataset", "default", split="train"
     ).to_polars(batched=False)
 
 
 def _identity_key(row: dict[str, Any]) -> tuple[str, ...]:
-    song_id = str(row.get("song_id", "") or "").strip()
-    if song_id:
-        return ("song_id", song_id)
+    content_id = str(row.get("content_id", "") or "").strip()
+    if content_id:
+        return ("content_id", content_id)
 
-    title = str(row.get("song_title", "") or "").strip().lower()
+    title = str(row.get("content_title", "") or "").strip().lower()
     artists = tuple(
-        str(artist).strip().lower() for artist in _to_artists(row.get("song_artists"))
+        str(artist).strip().lower() for artist in _to_artists(row.get("content_creators"))
     )
-    year = str(row.get("song_year", "") or "").strip()
+    year = str(row.get("content_year", "") or "").strip()
     if title or artists or year:
         return ("meta", title, "|".join(artists), year)
 
@@ -248,8 +248,9 @@ def build_candidate_pool(
 
         lyrics = row.get("reference_target", "") or ""
         if lyrics == "":
-            target_song_id = row["song_id"]
-            lyrics = lyrics_lookup.filter(pl.col("song_id")==target_song_id).select("reference_target")[0].item()
+            target_id = row.get("content_id") or row.get("song_id")
+            id_col = "content_id" if "content_id" in lyrics_lookup.columns else "song_id"
+            lyrics = lyrics_lookup.filter(pl.col(id_col) == target_id).select("reference_target")[0].item()
 
         mem_fraction = row.get("memorized_fraction", 0)
         if mem_fraction < threshold:
@@ -257,10 +258,10 @@ def build_candidate_pool(
 
         eligible.append(
             {
-                "song_id": row.get("song_id") or row.get("content_id") or "",
-                "song_title": row.get("song_title") or row.get("content_title") or "",
-                "song_artists": _to_artists(row.get("song_artists")),
-                "song_year": row.get("song_year"),
+                "content_id": row.get("content_id") or row.get("song_id") or "",
+                "content_title": row.get("content_title") or row.get("song_title") or "",
+                "content_creators": _to_artists(row.get("content_creators") or row.get("song_artists")),
+                "content_year": row.get("content_year") or row.get("song_year"),
                 "lyrics": lyrics,
                 "memorized_fraction": mem_fraction,
                 "max_p_z": row.get("max_p_z"),

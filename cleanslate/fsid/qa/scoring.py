@@ -239,7 +239,7 @@ def load_qa_eval(path: str | Path) -> dict[str, Any]:
 
 def _resolve_content_id(row: dict[str, Any]) -> str | None:
     """Resolve content_id from a row, falling back to song_id."""
-    raw = row.get("song_id") or row.get("content_id")
+    raw = row.get("content_id") or row.get("song_id")
     if raw is None or str(raw).strip() == "":
         return None
     return str(raw)
