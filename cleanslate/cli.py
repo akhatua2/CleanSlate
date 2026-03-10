@@ -367,9 +367,28 @@ def eval(
 
     # Validate text column
     if items and text_col not in items[0]:
-        console.print(f"[red]Error: text column '{text_col}' not found[/red]")
-        console.print(f"Available columns: {list(items[0].keys())}")
-        raise typer.Exit(1)
+        if text_col == "reference_target" and "content_id" in items[0]:
+            console.print(f"[yellow]'{text_col}' not in dataset, enriching from {DEFAULT_DATASET}...[/yellow]")
+            ref_ds = load_dataset(DEFAULT_DATASET, "default", split="train")
+            lookup: dict[str, str] = {}
+            for row in ref_ds:
+                cid = row.get("content_id") or row.get("song_id")
+                if cid and "reference_target" in row:
+                    lookup[str(cid)] = row["reference_target"]
+            enriched = 0
+            for item in items:
+                cid = str(item.get("content_id") or item.get("song_id") or "")
+                if cid in lookup:
+                    item["reference_target"] = lookup[cid]
+                    enriched += 1
+            console.print(f"  Enriched {enriched}/{len(items)} items with reference text")
+            if enriched == 0:
+                console.print("[red]Error: Could not find any matching reference texts[/red]")
+                raise typer.Exit(1)
+        else:
+            console.print(f"[red]Error: text column '{text_col}' not found[/red]")
+            console.print(f"Available columns: {list(items[0].keys())}")
+            raise typer.Exit(1)
 
     # Create config
     config = MemorizationConfig(
