@@ -8,15 +8,15 @@ from typing import Any
 from cleanslate.fsid.datasets.io import load_local_records
 
 
-def _resolve_song_id(row: dict[str, Any]) -> str | None:
-    raw = row.get("song_id") or row.get("content_id")
+def _resolve_content_id(row: dict[str, Any]) -> str | None:
+    raw = row.get("content_id") or row.get("song_id")
     if raw is None or str(raw).strip() == "":
         return None
     return str(raw)
 
 
-def _resolve_song_title(row: dict[str, Any]) -> str:
-    return str(row.get("song_title") or row.get("content_title") or "")
+def _resolve_content_title(row: dict[str, Any]) -> str:
+    return str(row.get("content_title") or row.get("song_title") or "")
 
 
 @dataclass
@@ -35,11 +35,11 @@ class WindowDelta:
 
 
 @dataclass
-class SongDelta:
-    """Per-song change in memorization after unlearning."""
+class ContentDelta:
+    """Per-content change in memorization after unlearning."""
 
-    song_id: str
-    song_title: str
+    content_id: str
+    content_title: str
     pre_memorized_fraction: float
     post_memorized_fraction: float
     delta_memorized_fraction: float
@@ -75,7 +75,7 @@ class UnlearningScore:
     forget_score: float
     retain_penalty: float
 
-    per_song: list[SongDelta]
+    per_content: list[ContentDelta]
 
     forget_total_windows: int | None = None
     forget_windows_forgotten: int | None = None
@@ -97,8 +97,8 @@ class UnlearningScore:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        for song in d.get("per_song", []):
-            song.pop("window_deltas", None)
+        for item in d.get("per_content", []):
+            item.pop("window_deltas", None)
         return d
 
 
@@ -171,7 +171,7 @@ def _compute_window_deltas(
     )
 
 
-def _index_unique_by_song_id(
+def _index_unique_by_content_id(
     records: list[dict[str, Any]],
     *,
     label: str,
@@ -180,24 +180,24 @@ def _index_unique_by_song_id(
     duplicates: set[str] = set()
     missing = 0
     for row in records:
-        song_id = _resolve_song_id(row)
-        if song_id is None:
+        content_id = _resolve_content_id(row)
+        if content_id is None:
             missing += 1
             continue
-        if song_id in indexed:
-            duplicates.add(song_id)
+        if content_id in indexed:
+            duplicates.add(content_id)
             continue
-        indexed[song_id] = row
+        indexed[content_id] = row
 
     if missing:
         raise ValueError(
-            f"{label} contains {missing} row(s) without song_id/content_id"
+            f"{label} contains {missing} row(s) without content_id"
         )
     if duplicates:
         sample = sorted(duplicates)[:5]
         raise ValueError(
-            f"{label} contains duplicate song_id values: {sample}. "
-            "Evaluation universes must be unique by song_id."
+            f"{label} contains duplicate content_id values: {sample}. "
+            "Evaluation universes must be unique by content_id."
         )
     return indexed
 
@@ -210,14 +210,14 @@ def compute_score(
 ) -> UnlearningScore:
     """Compute a benchmark score from local pre/post eval artifacts."""
     forget_rows = load_local_records(forget_set_path)
-    forget_by_id = _index_unique_by_song_id(forget_rows, label="forget set")
+    forget_by_id = _index_unique_by_content_id(forget_rows, label="forget set")
     forget_ids = set(forget_by_id.keys())
 
     pre_records = load_local_records(pre_eval_path)
     post_records = load_local_records(post_eval_path)
 
-    pre_by_id = _index_unique_by_song_id(pre_records, label="pre-eval")
-    post_by_id = _index_unique_by_song_id(post_records, label="post-eval")
+    pre_by_id = _index_unique_by_content_id(pre_records, label="pre-eval")
+    post_by_id = _index_unique_by_content_id(post_records, label="post-eval")
 
     pre_ids = set(pre_by_id.keys())
     post_ids = set(post_by_id.keys())
@@ -225,21 +225,21 @@ def compute_score(
         missing_from_post = sorted(pre_ids - post_ids)[:5]
         missing_from_pre = sorted(post_ids - pre_ids)[:5]
         raise ValueError(
-            "pre-eval and post-eval must cover the exact same song universe. "
+            "pre-eval and post-eval must cover the exact same content universe. "
             f"Missing from post: {missing_from_post}; missing from pre: {missing_from_pre}"
         )
 
     missing_forget = forget_ids - pre_ids
     if missing_forget:
         raise ValueError(
-            f"{len(missing_forget)} forget-set song(s) missing from eval universe: "
+            f"{len(missing_forget)} forget-set content(s) missing from eval universe: "
             f"{sorted(missing_forget)[:5]}"
         )
 
-    deltas: list[SongDelta] = []
-    for song_id in sorted(pre_ids):
-        pre = pre_by_id[song_id]
-        post = post_by_id[song_id]
+    deltas: list[ContentDelta] = []
+    for content_id in sorted(pre_ids):
+        pre = pre_by_id[content_id]
+        post = post_by_id[content_id]
 
         pre_frac_raw = pre.get("memorized_fraction")
         post_frac_raw = post.get("memorized_fraction")
@@ -248,16 +248,16 @@ def compute_score(
 
         if pre_frac_raw is None:
             raise KeyError(
-                f"Pre-eval row for song_id={song_id!r} missing 'memorized_fraction'"
+                f"Pre-eval row for content_id={content_id!r} missing 'memorized_fraction'"
             )
         if post_frac_raw is None:
             raise KeyError(
-                f"Post-eval row for song_id={song_id!r} missing 'memorized_fraction'"
+                f"Post-eval row for content_id={content_id!r} missing 'memorized_fraction'"
             )
         if pre_pz_raw is None:
-            raise KeyError(f"Pre-eval row for song_id={song_id!r} missing 'max_p_z'")
+            raise KeyError(f"Pre-eval row for content_id={content_id!r} missing 'max_p_z'")
         if post_pz_raw is None:
-            raise KeyError(f"Post-eval row for song_id={song_id!r} missing 'max_p_z'")
+            raise KeyError(f"Post-eval row for content_id={content_id!r} missing 'max_p_z'")
 
         pre_frac = float(pre_frac_raw)
         post_frac = float(post_frac_raw)
@@ -293,16 +293,16 @@ def compute_score(
             )
 
         deltas.append(
-            SongDelta(
-                song_id=song_id,
-                song_title=_resolve_song_title(pre),
+            ContentDelta(
+                content_id=content_id,
+                content_title=_resolve_content_title(pre),
                 pre_memorized_fraction=pre_frac,
                 post_memorized_fraction=post_frac,
                 delta_memorized_fraction=pre_frac - post_frac,
                 pre_max_p_z=pre_pz,
                 post_max_p_z=post_pz,
                 delta_max_p_z=pre_pz - post_pz,
-                in_forget_set=(song_id in forget_ids),
+                in_forget_set=(content_id in forget_ids),
                 **ppl_kwargs,
                 **window_kwargs,
             )
@@ -429,7 +429,7 @@ def compute_score(
         retain_mean_abs_delta_pz=retain_mean_abs_delta_pz,
         forget_score=forget_score,
         retain_penalty=retain_penalty,
-        per_song=deltas,
+        per_content=deltas,
         **ppl_agg_kwargs,
         **window_agg_kwargs,
     )
