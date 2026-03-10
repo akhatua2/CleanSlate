@@ -426,9 +426,48 @@ cleanslate fsid qa validate \
   -i data/fsid/qa/candidates.parquet \
   -k 5 \
   -o data/fsid/qa/validated.parquet
+
+# Merge validated QA into the HF dataset (adds content_qa column)
+cleanslate fsid qa merge \
+  -i data/fsid/qa/validated.parquet \
+  -d unlearning-cleanslate/cleanslate_dataset \
+  --hf-push unlearning-cleanslate/cleanslate_dataset
 ```
 
 QA pairs must be:
 - **Atomic**: Exactly one unambiguous answer
 - **Objective**: No subjective interpretation
 - **Self-contained**: Include song/book title in the question
+
+### QA Evaluation & Scoring
+
+Evaluate a model's QA accuracy and score forget/retain splits — independent of lm-eval:
+
+```bash
+# Evaluate pre-unlearning model
+cleanslate fsid qa eval \
+  -m allenai/Olmo-3-1025-7B \
+  -d unlearning-cleanslate/cleanslate_dataset \
+  -c qa_benchmark \
+  --judge \
+  -o results/fsid/qa_pre.json
+
+# Evaluate post-unlearning checkpoint
+cleanslate fsid qa eval \
+  -m results/fsid/unlearning/olmo3_npo_fsdp/<run_name> \
+  -d unlearning-cleanslate/cleanslate_dataset \
+  -c qa_benchmark \
+  --judge \
+  -o results/fsid/qa_post.json
+
+# Score: compare forget vs retain QA accuracy change
+cleanslate fsid qa score \
+  --forget-path data/fsid/curated/baseline/olmo7b/forget_set.parquet \
+  --pre-qa results/fsid/qa_pre.json \
+  --post-qa results/fsid/qa_post.json \
+  -o results/fsid/qa_score.json
+```
+
+`qa eval` generates answers using the model and checks correctness via an LLM judge (Gemini). Use `--no-judge` for fast contains-match only.
+
+`qa score` splits QA results by forget/retain content and reports per-subset accuracy deltas. After unlearning, forget-set QA accuracy should ideally stay the same (knowledge retention), while p_z should drop (verbatim memorization removed)

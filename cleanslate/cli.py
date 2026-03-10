@@ -62,10 +62,12 @@ MODEL_ALIASES: dict[str, tuple[str, str]] = {
     "qwen-8b": ("Qwen/Qwen3-8B", "qwen3-8b"),
     "qwen-8b-base": ("Qwen/Qwen3-8B-Base", "qwen3-8b-base"),
     "olmo-7b": ("allenai/Olmo-3-1025-7B", "olmo-3-7b"),
+    "olmo-32b": ("allenai/Olmo-3-1125-32B", "olmo-3-32b"),
     "gemma-12b": ("google/gemma-3-12b-pt", "gemma-3-12b"),
     "nemotron-9b": ("nvidia/NVIDIA-Nemotron-Nano-9B-v2", "nemotron-nano-9b"),
     "trinity-nano": ("arcee-ai/Trinity-Nano-Base", "trinity-nano"),
     "gpt-oss-20b": ("openai/gpt-oss-20b", "gpt-oss-20b"),
+    "qwen3-coder-80b":("Qwen/Qwen3-Coder-Next", "qwen3-coder-next")
 }
 
 
