@@ -40,14 +40,16 @@ echo "[Phase 1] Pre-unlearn validation ..."
 if [[ -f "${VAL_DIR}/pre_gsm8k.json" ]]; then
     echo "  SKIP: pre_gsm8k.json exists"
 else
-    CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid validate \
-        -m "$MODEL" -B gsm8k -o "${VAL_DIR}/pre_gsm8k.json" --num-gpus 1 --mem-fraction 0.80
+    cleanslate fsid validate \
+        -m "$MODEL" -B gsm8k -o "${VAL_DIR}/pre_gsm8k.json" \
+        --num-gpus 1 --gpu-ids "$FIRST_GPU" --mem-fraction 0.80
 fi
 if [[ -f "${VAL_DIR}/pre_qa.json" ]]; then
     echo "  SKIP: pre_qa.json exists"
 else
-    CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid qa eval \
-        -m "$MODEL" -o "${VAL_DIR}/pre_qa.json"
+    cleanslate fsid qa eval \
+        -m "$MODEL" -o "${VAL_DIR}/pre_qa.json" \
+        -g 1 --gpu-ids "$FIRST_GPU"
 fi
 
 # ── Phase 2 ──────────────────────────────────────────────────────────────
@@ -64,7 +66,7 @@ else
 fi
 
 # ── Phase 3 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     if [[ -n "$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")" ]]; then
         echo "[Phase 3] SKIP: ${OBJ} checkpoint exists"
     else
@@ -75,12 +77,13 @@ for OBJ in npo simnpo; do
             --forget-path "${CURATED_DIR}/forget_set.parquet" \
             --retain-path "${CURATED_DIR}/retain_set.parquet" \
             -o "${UNLEARN_DIR}/${OBJ}" \
-            --batch-size 16 --grad-accum 2 --epochs 1
+            --gradient-checkpointing \
+            --batch-size 1 --grad-accum 8 --epochs 1
     fi
 done
 
 # ── Phase 4 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     if compgen -G "${POST_EVAL_DIR}/${OBJ}/*/results.parquet" > /dev/null 2>&1; then
         echo "[Phase 4] SKIP: ${OBJ} post-eval exists"
     else
@@ -88,31 +91,34 @@ for OBJ in npo simnpo; do
         echo "[Phase 4] Post-eval ${OBJ} (tp=2) — checkpoint: ${CKPT} ..."
         cleanslate eval -d "$EVAL_DATASET" -c default \
             -m "$CKPT" \
-            --tp-size 2 --num-gpus 2 --gpu-ids "$FIRST_TWO" \
+            --num-gpus 1 --gpu-ids "$FIRST_GPU" \
+            --mem-fraction 0.50 \
             -o "${POST_EVAL_DIR}/${OBJ}" --no-push
     fi
 done
 
 # ── Phase 5 ──────────────────────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
     if [[ -f "${VAL_DIR}/post_${OBJ}_gsm8k.json" ]]; then
         echo "[Phase 5] SKIP: post_${OBJ}_gsm8k.json exists"
     else
         echo "[Phase 5] Post-validation ${OBJ} gsm8k ..."
-        CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid validate \
-            -m "$CKPT" -B gsm8k -o "${VAL_DIR}/post_${OBJ}_gsm8k.json" --num-gpus 1 --mem-fraction 0.80
+        cleanslate fsid validate \
+            -m "$CKPT" -B gsm8k -o "${VAL_DIR}/post_${OBJ}_gsm8k.json" \
+            --num-gpus 1 --gpu-ids "$FIRST_GPU" --mem-fraction 0.80
     fi
     if [[ -f "${VAL_DIR}/post_${OBJ}_qa.json" ]]; then
         echo "[Phase 5] SKIP: post_${OBJ}_qa.json exists"
     else
         echo "[Phase 5] Post-validation ${OBJ} QA ..."
-        CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid qa eval -m "$CKPT" -o "${VAL_DIR}/post_${OBJ}_qa.json"
+        cleanslate fsid qa eval -m "$CKPT" -o "${VAL_DIR}/post_${OBJ}_qa.json" \
+            -g 1 --gpu-ids "$FIRST_GPU"
     fi
 done
 
 # ── Phase 6 (always rerun) ──────────────────────────────────────────────
-for OBJ in npo simnpo; do
+for OBJ in simnpo; do
     echo "[Phase 6] Scoring ${OBJ} ..."
     cleanslate fsid score \
         --forget-path "${CURATED_DIR}/forget_set.parquet" \
