@@ -10,7 +10,7 @@
 #   ./scripts/final/run_remote.sh
 #
 # Set SLURM_PARTITION env var to override the default partition:
-#   SLURM_PARTITION=gpu ./scripts/final/run_remote.sh
+#   SLURM_PARTITION=tamper_resistance ./scripts/final/run_remote.sh
 # ============================================================================
 set -euo pipefail
 
@@ -22,7 +22,7 @@ MODELS=(olmo-7b llama-8b qwen-8b qwen-8b-base trinity-nano)
 echo "============================================="
 echo " CleanSlate Final Pipeline — Slurm Cluster"
 echo " Models: ${MODELS[*]}"
-echo " Partition: ${SLURM_PARTITION:-<PARTITION>}"
+echo " Partition: ${SLURM_PARTITION:-tamper_resistance}"
 echo " Submitted: $(date)"
 echo "============================================="
 echo ""
