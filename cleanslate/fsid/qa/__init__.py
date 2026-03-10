@@ -25,7 +25,6 @@ from cleanslate.fsid.qa.io import (
 from cleanslate.fsid.qa.scoring import (
     compute_qa_score,
     evaluate_qa,
-    load_qa_benchmark,
     load_qa_eval,
     save_qa_eval,
     save_qa_score,
@@ -54,7 +53,6 @@ __all__ = [
     "load_validated",
     "export_for_dataset",
     # Scoring
-    "load_qa_benchmark",
     "evaluate_qa",
     "save_qa_eval",
     "load_qa_eval",

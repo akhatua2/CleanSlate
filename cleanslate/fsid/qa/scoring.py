@@ -1,98 +1,186 @@
 """QA benchmark evaluation and forget/retain split scoring."""
 
 import json
+import logging
+import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from datasets import load_dataset
+import lm_eval  # type: ignore[import-untyped]
+from lm_eval.tasks import TaskManager  # type: ignore[import-untyped]
 
 from cleanslate.fsid.datasets.io import load_local_records
 from cleanslate.fsid.qa.base import QABenchmarkSummary, QAEvalResult
+from cleanslate.fsid.validation import _patch_sglang_sampling_params
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_DATASET = "unlearning-cleanslate/cleanslate_dataset"
+_DEFAULT_CONFIG = "qa_benchmark"
+_TASKS_DIR = str(Path(__file__).parent / "tasks")
 
 
-def load_qa_benchmark(
-    dataset: str = "unlearning-cleanslate/cleanslate_dataset",
-    config: str = "qa_benchmark",
-) -> list[dict[str, Any]]:
-    """Load QA pairs from the HF ``qa_benchmark`` subset."""
-    ds = load_dataset(dataset, config, split="train")
-    return list(ds)  # type: ignore[arg-type]
+def _write_temp_task_yaml(
+    dataset: str,
+    config: str,
+    use_judge: bool,
+) -> tuple[str, str]:
+    """Write a temporary task YAML for a custom dataset/config.
+
+    Returns (tasks_dir, task_name).
+    """
+    task_name = "cleanslate_qa_custom" if use_judge else "cleanslate_qa_fast_custom"
+    metric_fn = "utils.llm_judge_match" if use_judge else "utils.contains_match"
+
+    yaml_content = f"""\
+task: {task_name}
+dataset_path: {dataset}
+dataset_name: {config}
+test_split: train
+output_type: generate_until
+doc_to_text: "Question: {{{{question}}}}\\nAnswer:"
+doc_to_target: "{{{{answer}}}}"
+generation_kwargs:
+  until:
+    - "\\n"
+    - "Question:"
+  max_gen_toks: 64
+  do_sample: false
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+  - metric: !function {metric_fn}
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0
+"""
+    tmp_dir = tempfile.mkdtemp(prefix="cleanslate_qa_task_")
+    yaml_path = Path(tmp_dir) / f"{task_name}.yaml"
+    yaml_path.write_text(yaml_content)
+
+    # Copy utils.py so the metric functions are resolvable
+    import shutil
+
+    utils_src = Path(__file__).parent / "tasks" / "utils.py"
+    shutil.copy2(utils_src, Path(tmp_dir) / "utils.py")
+
+    return tmp_dir, task_name
 
 
 def evaluate_qa(
     model_name: str,
-    qa_pairs: list[dict[str, Any]],
     *,
+    dataset: str = _DEFAULT_DATASET,
+    config: str = _DEFAULT_CONFIG,
     use_judge: bool = True,
-    dtype: str = "bfloat16",
-    max_judge_workers: int = 10,
+    max_judge_workers: int = 32,
+    mem_fraction: float = 0.85,
+    tp_size: int = 1,
+    dp_size: int = 1,
+    batch_size: int | str = "auto",
+    limit: int | None = None,
 ) -> QABenchmarkSummary:
-    """Evaluate a model on QA pairs using vLLM offline inference.
+    """Evaluate a model on QA pairs using lm-eval with SGLang backend.
 
-    Formats prompts as ``Question: {q}\\nAnswer:`` (matches cleanslate_qa.yaml),
-    generates with greedy decoding, then judges correctness via ``contains_match``
-    and optionally the LLM judge.
+    Always runs the ``cleanslate_qa_fast`` task (contains_match + exact_match,
+    no Gemini calls) to get model predictions.  When ``use_judge=True``, runs
+    the LLM judge in parallel afterwards on samples that didn't already pass
+    ``contains_match``.
     """
-    from vllm import LLM, SamplingParams  # type: ignore[import-untyped]
-
-    from cleanslate.fsid.qa.tasks.utils import contains_match
+    _patch_sglang_sampling_params()
 
     start = time.monotonic()
 
-    llm = LLM(model=model_name, dtype=dtype, trust_remote_code=True)
+    # Always run the fast task — judge calls happen post-hoc in parallel
+    needs_custom = dataset != _DEFAULT_DATASET or config != _DEFAULT_CONFIG
+    if needs_custom:
+        tasks_dir, task_name = _write_temp_task_yaml(
+            dataset, config, use_judge=False,
+        )
+    else:
+        tasks_dir = _TASKS_DIR
+        task_name = "cleanslate_qa_fast"
 
-    prompts = [f"Question: {qa['question']}\nAnswer:" for qa in qa_pairs]
+    task_manager = TaskManager(include_path=tasks_dir)
 
-    sampling_params = SamplingParams(
-        max_tokens=64,
-        temperature=0,
-        stop=["\n", "Question:"],
+    model_args = (
+        f"pretrained={model_name},"
+        f"mem_fraction_static={mem_fraction},"
+        f"tp_size={tp_size},"
+        f"dp_size={dp_size}"
     )
-    outputs = llm.generate(prompts, sampling_params)
 
-    predictions = [output.outputs[0].text.strip() for output in outputs]
+    eval_results: dict[str, Any] = lm_eval.simple_evaluate(
+        model="sglang",
+        model_args=model_args,
+        tasks=[task_name],
+        limit=limit,
+        batch_size=batch_size,
+        log_samples=True,
+        task_manager=task_manager,
+    )
 
-    # Score each prediction
+    # Extract per-sample predictions from logged samples
+    samples: list[dict[str, Any]] = eval_results.get("samples", {}).get(
+        task_name, []
+    )
+
     per_qa_results: list[dict[str, object]] = []
-    for i, qa in enumerate(qa_pairs):
-        pred = predictions[i]
-        ref = str(qa["answer"])
-        cm = contains_match([ref], [pred]) > 0.5
+    for sample in samples:
+        doc: dict[str, Any] = sample.get("doc", {})
+        # filtered_resps is list of (response_text, ...) tuples
+        filtered_resps = sample.get("filtered_resps", [])
+        prediction = str(filtered_resps[0]).strip() if filtered_resps else ""
+
+        exact_match_score = float(sample.get("exact_match", 0))
+        contains_match_score = float(sample.get("contains_match", 0))
 
         per_qa_results.append({
-            "content_id": str(qa["content_id"]),
-            "content_title": str(qa.get("content_title", "")),
-            "question": str(qa["question"]),
-            "answer": ref,
-            "prediction": pred,
-            "contains_match": cm,
-            "is_correct": cm,
+            "content_id": str(doc.get("content_id", "")),
+            "content_title": str(doc.get("content_title", "")),
+            "question": str(doc.get("question", "")),
+            "answer": str(doc.get("answer", "")),
+            "prediction": prediction,
+            "exact_match": exact_match_score,
+            "contains_match": contains_match_score,
+            "llm_judge_match": contains_match_score,  # default; overwritten below
+            "is_correct": bool(contains_match_score > 0.5),
         })
 
-    # Optionally refine with LLM judge (skip for obvious matches)
+    # Parallel LLM judge on all samples
     if use_judge:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from tqdm import tqdm
+
         from cleanslate.fsid.qa.judge import is_correct as judge_is_correct
+
+        n_samples = len(per_qa_results)
 
         def _judge(idx: int) -> tuple[int, bool]:
             r = per_qa_results[idx]
-            if r["contains_match"]:
-                return idx, True
-            try:
-                result = judge_is_correct(
-                    str(r["question"]), str(r["answer"]), str(r["prediction"])
-                )
-                return idx, result
-            except Exception:
-                return idx, bool(r["contains_match"])
+            return idx, judge_is_correct(
+                str(r["question"]), str(r["answer"]), str(r["prediction"]),
+            )
 
         with ThreadPoolExecutor(max_workers=max_judge_workers) as pool:
-            futures = [pool.submit(_judge, i) for i in range(len(per_qa_results))]
-            for future in futures:
-                idx, correct = future.result()
-                per_qa_results[idx]["is_correct"] = correct
+            futures = {
+                pool.submit(_judge, i): i for i in range(n_samples)
+            }
+            with tqdm(
+                total=n_samples, desc="LLM judge", unit="sample",
+            ) as pbar:
+                for future in as_completed(futures):
+                    idx, correct = future.result()
+                    per_qa_results[idx]["llm_judge_match"] = (
+                        1.0 if correct else 0.0
+                    )
+                    per_qa_results[idx]["is_correct"] = correct
+                    pbar.update(1)
 
     # Aggregate per content_id
     by_content: dict[str, list[dict[str, object]]] = {}
@@ -119,12 +207,13 @@ def evaluate_qa(
         )
 
     elapsed = time.monotonic() - start
+    total_questions = len(per_qa_results)
 
     return QABenchmarkSummary(
         model_name=model_name,
-        total_questions=len(qa_pairs),
+        total_questions=total_questions,
         total_correct=total_correct,
-        overall_accuracy=total_correct / len(qa_pairs) if qa_pairs else 0.0,
+        overall_accuracy=total_correct / total_questions if total_questions else 0.0,
         per_content=per_content,
         eval_time_seconds=elapsed,
     )
