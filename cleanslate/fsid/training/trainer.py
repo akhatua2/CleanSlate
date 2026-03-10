@@ -102,9 +102,11 @@ class CleanSlateUnlearnTrainer(Trainer):
         until FSDP re-shards the new model.
         """
         ref_model = load_model(config)
-        ref_model.to(accelerator.device)
         for param in ref_model.parameters():
             param.requires_grad = False
+        # Let accelerator.prepare_model handle device placement via FSDP
+        # sharding.  Calling .to(device) before prepare would materialise
+        # the full model on every GPU and OOM for large models (e.g. 32B).
         ref_model = accelerator.prepare_model(ref_model, evaluation_mode=True)
         ref_model.eval()
         return ref_model

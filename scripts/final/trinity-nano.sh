@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_DIR"
 
-PARTITION="${SLURM_PARTITION:-tamper_resistance}"
+PARTITION="${SLURM_PARTITION:-<PARTITION>}"
 TIME_1GPU="12:00:00"
 TIME_2GPU="8:00:00"
 LOG_DIR="logs/final/${ALIAS}"
@@ -59,27 +59,26 @@ if [[ "${1:-}" == "--local" ]]; then
     # Phase 2
     echo "[Phase 2] Build pool + curate ..."
     if [[ -f "${POOL_DIR}/pool.parquet" ]]; then echo "  SKIP: pool exists"
-    else cleanslate fsid build-pool --eval-dataset "$EVAL_DATASET" --threshold 0.05 -o "$POOL_DIR"; fi
+    else cleanslate fsid build-pool --eval-dataset "$EVAL_DATASET" --threshold 0.30 -o "$POOL_DIR"; fi
     if [[ -f "${CURATED_DIR}/forget_set.parquet" ]]; then echo "  SKIP: curated"
     else cleanslate fsid curate --forget-pool-path "${POOL_DIR}/forget.parquet" -o "$CURATED_DIR"; fi
 
     # Phase 3
-    for OBJ in simnpo; do
+    for OBJ in npo simnpo; do
         if [[ -n "$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")" ]]; then echo "[Phase 3] SKIP: ${OBJ} checkpoint exists"
         else
             echo "[Phase 3] Training ${OBJ} ..."
-            CUDA_VISIBLE_DEVICES="$FIRST_TWO" accelerate launch --num_processes 2 -m cleanslate fsid train \
+            CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid train \
                 --config "cleanslate/fsid/configs/${OBJ}.yaml" -m "$MODEL" \
                 --forget-path "${CURATED_DIR}/forget_set.parquet" \
                 --retain-path "${CURATED_DIR}/retain_set.parquet" \
-                -o "${UNLEARN_DIR}/${OBJ}" --batch-size 2 --grad-accum 2 --epochs 1 \
-                --distributed-strategy fsdp --fsdp-sharding-strategy full_shard --gradient-checkpointing
+                -o "${UNLEARN_DIR}/${OBJ}" --batch-size 16 --grad-accum 2 --epochs 1
         fi
     done
 
     # Phase 4
-    for OBJ in simnpo; do
-        if compgen -G "${POST_EVAL_DIR}/${OBJ}/*.parquet" > /dev/null 2>&1; then echo "[Phase 4] SKIP: ${OBJ} post-eval exists"
+    for OBJ in npo simnpo; do
+        if compgen -G "${POST_EVAL_DIR}/${OBJ}/*/results.parquet" > /dev/null 2>&1; then echo "[Phase 4] SKIP: ${OBJ} post-eval exists"
         else
             CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
             echo "[Phase 4] Post-eval ${OBJ} (tp=2) — checkpoint: ${CKPT} ..."
@@ -89,7 +88,7 @@ if [[ "${1:-}" == "--local" ]]; then
     done
 
     # Phase 5
-    for OBJ in simnpo; do
+    for OBJ in npo simnpo; do
         CKPT=$(find_checkpoint "${UNLEARN_DIR}/${OBJ}")
         if [[ -f "${VAL_DIR}/post_${OBJ}_gsm8k.json" ]]; then echo "[Phase 5] SKIP: post_${OBJ}_gsm8k.json exists"
         else CUDA_VISIBLE_DEVICES="$FIRST_GPU" cleanslate fsid validate \
@@ -100,10 +99,10 @@ if [[ "${1:-}" == "--local" ]]; then
     done
 
     # Phase 6 (always rerun)
-    for OBJ in simnpo; do
+    for OBJ in npo simnpo; do
         echo "[Phase 6] Scoring ${OBJ} ..."
         cleanslate fsid score --forget-path "${CURATED_DIR}/forget_set.parquet" \
-            --pre-eval "$EVAL_DATASET" --post-eval "${POST_EVAL_DIR}/${OBJ}/default/results.parquet" \
+            --pre-eval "$EVAL_DATASET" --post-eval "${POST_EVAL_DIR}/${OBJ}" \
             --pre-validation "${VAL_DIR}/pre_gsm8k.json" \
             --post-validation "${VAL_DIR}/post_${OBJ}_gsm8k.json" \
             -o "${SCORE_DIR}/${OBJ}_score.json"
@@ -122,74 +121,87 @@ echo "=== Submitting ${ALIAS} Slurm job chain ==="
 JOB_A=$(sbatch --parsable \
     --partition="$PARTITION" --gres=gpu:1 --time="$TIME_1GPU" \
     --job-name="${ALIAS}-pre" --output="${LOG_DIR}/pre_%j.log" \
-    <<EOF
-#!/bin/bash
+    --wrap="
 set -euo pipefail
-source /data/animesh_jha/CleanSlate/.venv/bin/activate
 cd $PROJECT_DIR
 mkdir -p $POOL_DIR $CURATED_DIR $VAL_DIR $UNLEARN_DIR $POST_EVAL_DIR $SCORE_DIR
 [[ -f ${VAL_DIR}/pre_gsm8k.json ]] || cleanslate fsid validate -m $MODEL -B gsm8k -o ${VAL_DIR}/pre_gsm8k.json --num-gpus 1 --mem-fraction 0.80
 [[ -f ${VAL_DIR}/pre_qa.json ]]    || cleanslate fsid qa eval -m $MODEL -o ${VAL_DIR}/pre_qa.json
-[[ -f ${POOL_DIR}/pool.parquet ]]  || cleanslate fsid build-pool --eval-dataset $EVAL_DATASET --threshold 0.05 -o $POOL_DIR
+[[ -f ${POOL_DIR}/pool.parquet ]]  || cleanslate fsid build-pool --eval-dataset $EVAL_DATASET --threshold 0.30 -o $POOL_DIR
 [[ -f ${CURATED_DIR}/forget_set.parquet ]] || cleanslate fsid curate --forget-pool-path ${POOL_DIR}/forget.parquet -o $CURATED_DIR
-EOF
-)
+")
 echo "  Job A (pre+pool+curate): ${JOB_A}"
 
+JOB_B=$(sbatch --parsable \
+    --partition="$PARTITION" --gres=gpu:1 --time="$TIME_1GPU" \
+    --job-name="${ALIAS}-npo" --output="${LOG_DIR}/npo_%j.log" \
+    --dependency="afterok:${JOB_A}" \
+    --wrap="
+set -euo pipefail
+cd $PROJECT_DIR
+ls ${UNLEARN_DIR}/npo/*/config.json &>/dev/null || cleanslate fsid train --config cleanslate/fsid/configs/npo.yaml \
+    -m $MODEL --forget-path ${CURATED_DIR}/forget_set.parquet \
+    --retain-path ${CURATED_DIR}/retain_set.parquet \
+    -o ${UNLEARN_DIR}/npo --batch-size 16 --grad-accum 2 --epochs 1
+")
+echo "  Job B (train NPO):       ${JOB_B}  (after ${JOB_A})"
+
 JOB_C=$(sbatch --parsable \
-    --partition="$PARTITION" --gres=gpu:2 --time="$TIME_2GPU" \
+    --partition="$PARTITION" --gres=gpu:1 --time="$TIME_1GPU" \
     --job-name="${ALIAS}-simnpo" --output="${LOG_DIR}/simnpo_%j.log" \
     --dependency="afterok:${JOB_A}" \
-    <<EOF
-#!/bin/bash
+    --wrap="
 set -euo pipefail
-source /data/animesh_jha/CleanSlate/.venv/bin/activate
 cd $PROJECT_DIR
-if ls ${UNLEARN_DIR}/simnpo/*/config.json >/dev/null 2>&1; then
-    echo "SKIP: simnpo checkpoint exists"
-else
-    export MASTER_PORT=\$((29500 + RANDOM % 1000))
-    accelerate launch --num_processes 2 --main_process_port \$MASTER_PORT -m cleanslate fsid train --config cleanslate/fsid/configs/simnpo.yaml \
-        -m $MODEL --forget-path ${CURATED_DIR}/forget_set.parquet \
-        --retain-path ${CURATED_DIR}/retain_set.parquet \
-        -o ${UNLEARN_DIR}/simnpo --batch-size 2 --grad-accum 2 --epochs 1 \
-        --distributed-strategy fsdp --fsdp-sharding-strategy full_shard --gradient-checkpointing
-fi
-EOF
-)
+ls ${UNLEARN_DIR}/simnpo/*/config.json &>/dev/null || cleanslate fsid train --config cleanslate/fsid/configs/simnpo.yaml \
+    -m $MODEL --forget-path ${CURATED_DIR}/forget_set.parquet \
+    --retain-path ${CURATED_DIR}/retain_set.parquet \
+    -o ${UNLEARN_DIR}/simnpo --batch-size 16 --grad-accum 2 --epochs 1
+")
 echo "  Job C (train SimNPO):    ${JOB_C}  (after ${JOB_A})"
+
+JOB_D=$(sbatch --parsable \
+    --partition="$PARTITION" --gres=gpu:2 --time="$TIME_2GPU" \
+    --job-name="${ALIAS}-post-npo" --output="${LOG_DIR}/post_npo_%j.log" \
+    --dependency="afterok:${JOB_B}" \
+    --wrap="
+set -euo pipefail
+cd $PROJECT_DIR
+CKPT=\$(dirname \"\$(ls -t ${UNLEARN_DIR}/npo/*/config.json 2>/dev/null | head -1)\")
+compgen -G '${POST_EVAL_DIR}/npo/*/results.parquet' > /dev/null 2>&1 || cleanslate eval -d $EVAL_DATASET -c default -m \$CKPT \
+    --tp-size 2 --num-gpus 2 -o ${POST_EVAL_DIR}/npo --no-push
+[[ -f ${VAL_DIR}/post_npo_gsm8k.json ]] || cleanslate fsid validate -m \$CKPT -B gsm8k \
+    -o ${VAL_DIR}/post_npo_gsm8k.json --num-gpus 1 --mem-fraction 0.80
+[[ -f ${VAL_DIR}/post_npo_qa.json ]] || cleanslate fsid qa eval -m \$CKPT -o ${VAL_DIR}/post_npo_qa.json
+")
+echo "  Job D (post-eval NPO):   ${JOB_D}  (after ${JOB_B})"
 
 JOB_E=$(sbatch --parsable \
     --partition="$PARTITION" --gres=gpu:2 --time="$TIME_2GPU" \
     --job-name="${ALIAS}-post-simnpo" --output="${LOG_DIR}/post_simnpo_%j.log" \
     --dependency="afterok:${JOB_C}" \
-    <<EOF
-#!/bin/bash
+    --wrap="
 set -euo pipefail
-source /data/animesh_jha/CleanSlate/.venv/bin/activate
 cd $PROJECT_DIR
-CKPT=\$(dirname "\$(ls -t ${UNLEARN_DIR}/simnpo/*/config.json 2>/dev/null | head -1)")
-compgen -G '${POST_EVAL_DIR}/simnpo/*.parquet' > /dev/null 2>&1 || cleanslate eval -d $EVAL_DATASET -c default -m \$CKPT \
+CKPT=\$(dirname \"\$(ls -t ${UNLEARN_DIR}/simnpo/*/config.json 2>/dev/null | head -1)\")
+compgen -G '${POST_EVAL_DIR}/simnpo/*/results.parquet' > /dev/null 2>&1 || cleanslate eval -d $EVAL_DATASET -c default -m \$CKPT \
     --tp-size 2 --num-gpus 2 -o ${POST_EVAL_DIR}/simnpo --no-push
 [[ -f ${VAL_DIR}/post_simnpo_gsm8k.json ]] || cleanslate fsid validate -m \$CKPT -B gsm8k \
     -o ${VAL_DIR}/post_simnpo_gsm8k.json --num-gpus 1 --mem-fraction 0.80
 [[ -f ${VAL_DIR}/post_simnpo_qa.json ]] || cleanslate fsid qa eval -m \$CKPT -o ${VAL_DIR}/post_simnpo_qa.json
-EOF
-)
+")
 echo "  Job E (post-eval SimNPO): ${JOB_E}  (after ${JOB_C})"
 
 JOB_F=$(sbatch --parsable \
     --partition="$PARTITION" --gres=gpu:1 --time="01:00:00" \
     --job-name="${ALIAS}-score" --output="${LOG_DIR}/score_%j.log" \
-    --dependency="afterok:${JOB_E}" \
-    <<EOF
-#!/bin/bash
+    --dependency="afterok:${JOB_D}:${JOB_E}" \
+    --wrap="
 set -euo pipefail
-source /data/animesh_jha/CleanSlate/.venv/bin/activate
 cd $PROJECT_DIR
-for OBJ in simnpo; do
+for OBJ in npo simnpo; do
     cleanslate fsid score --forget-path ${CURATED_DIR}/forget_set.parquet \
-        --pre-eval $EVAL_DATASET --post-eval ${POST_EVAL_DIR}/\${OBJ}/default/results.parquet \
+        --pre-eval $EVAL_DATASET --post-eval ${POST_EVAL_DIR}/\${OBJ} \
         --pre-validation ${VAL_DIR}/pre_gsm8k.json \
         --post-validation ${VAL_DIR}/post_\${OBJ}_gsm8k.json \
         -o ${SCORE_DIR}/\${OBJ}_score.json
@@ -197,8 +209,7 @@ for OBJ in simnpo; do
         --pre-qa ${VAL_DIR}/pre_qa.json --post-qa ${VAL_DIR}/post_\${OBJ}_qa.json \
         -o ${SCORE_DIR}/\${OBJ}_qa_score.json
 done
-EOF
-)
-echo "  Job F (score):           ${JOB_F}  (after ${JOB_E})"
+")
+echo "  Job F (score):           ${JOB_F}  (after ${JOB_D},${JOB_E})"
 
 echo "=== ${ALIAS} job chain submitted ==="

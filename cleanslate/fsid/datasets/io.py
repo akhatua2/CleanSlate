@@ -57,6 +57,17 @@ def load_local_records(path: str | Path) -> list[dict[str, Any]]:
             "or pass a HuggingFace dataset ID (org/dataset or org/dataset:config)."
         )
 
+    # If path is a directory, look for results.parquet inside it
+    if path.is_dir():
+        candidates = sorted(path.glob("*/results.parquet"))
+        if not candidates:
+            candidates = sorted(path.glob("results.parquet"))
+        if not candidates:
+            raise ValueError(
+                f"Directory {path} contains no results.parquet file"
+            )
+        path = candidates[0]
+
     suffix = path.suffix.lower()
     if suffix == ".parquet":
         try:
