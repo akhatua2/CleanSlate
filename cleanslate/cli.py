@@ -963,6 +963,9 @@ def eval_all(
     num_gpus: int = typer.Option(
         1, "--num-gpus", "-g", help="Number of GPUs per model"
     ),
+    tp_size: int = typer.Option(
+        1, "--tp-size", help="Tensor parallel size (for large models)"
+    ),
     gpu_ids: str = typer.Option(
         None, "--gpu-ids", help="GPU IDs to use (e.g. '0,1,2,3')"
     ),
@@ -1019,6 +1022,8 @@ def eval_all(
 
         cmd = [sys.executable, "-m", "cleanslate.cli", "eval", "-m", model]
         cmd.extend(["--num-gpus", str(num_gpus)])
+        if tp_size > 1:
+            cmd.extend(["--tp-size", str(tp_size)])
         if gpu_ids:
             cmd.extend(["--gpu-ids", gpu_ids])
 

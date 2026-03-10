@@ -23,6 +23,12 @@ book_paper.txt
 logs/
 # Environment / secrets
 .env
+run_eval.sh
+conda_env_setup.sh
+
+# Data files (except scripts/books-data)
+*.parquet
+!scripts/books-data/*.parquet
 
 # Books data cache (raw Gutenberg downloads + parquet)
 scripts/books-data/cache/
