@@ -25,6 +25,7 @@ from cleanslate.fsid.rules import (
     list_forget_set_rules,
     save_curated_sets,
 )
+from cleanslate.fsid.qa.cli import qa_app
 from cleanslate.fsid.scoring.benchmark import compute_score, save_score
 from cleanslate.fsid.training.trainer import train_unlearning
 from cleanslate.fsid.validation import run_validation
@@ -39,6 +40,7 @@ fsid_app = typer.Typer(
     help="Forget Set IDentification: build pools, curate sets, train, and score.",
     no_args_is_help=True,
 )
+fsid_app.add_typer(qa_app)
 console = Console()
 
 

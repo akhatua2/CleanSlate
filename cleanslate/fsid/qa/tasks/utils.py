@@ -49,12 +49,7 @@ def llm_judge_match(references: list[str], predictions: list[str]) -> float:
         return 1.0
 
     # Call LLM judge
-    try:
-        from cleanslate.fsid.qa.judge import is_correct
-        # Note: is_correct expects (question, reference, model_answer)
-        # We pass empty question since judge prompt doesn't use it
-        result = is_correct("", ref, pred)
-        return 1.0 if result else 0.0
-    except Exception:
-        # Fallback to contains_match on error
-        return contains_match(references, predictions)
+    from cleanslate.fsid.qa.judge import is_correct
+
+    result = is_correct("", ref, pred)
+    return 1.0 if result else 0.0

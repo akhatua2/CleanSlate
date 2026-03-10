@@ -22,6 +22,14 @@ from cleanslate.fsid.qa.io import (
     load_validated,
     export_for_dataset,
 )
+from cleanslate.fsid.qa.scoring import (
+    compute_qa_score,
+    evaluate_qa,
+    load_qa_benchmark,
+    load_qa_eval,
+    save_qa_eval,
+    save_qa_score,
+)
 
 __all__ = [
     # Dataclasses
@@ -45,4 +53,11 @@ __all__ = [
     "save_validated",
     "load_validated",
     "export_for_dataset",
+    # Scoring
+    "load_qa_benchmark",
+    "evaluate_qa",
+    "save_qa_eval",
+    "load_qa_eval",
+    "compute_qa_score",
+    "save_qa_score",
 ]
