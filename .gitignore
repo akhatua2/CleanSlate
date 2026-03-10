@@ -20,7 +20,7 @@ runs/
 data/
 outputs/
 book_paper.txt
-
+logs/
 # Environment / secrets
 .env
 
