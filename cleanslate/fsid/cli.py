@@ -665,6 +665,16 @@ def validate(
         "--seed",
         help="Random seed",
     ),
+    log_samples: bool = typer.Option(
+        False,
+        "--log-samples",
+        help="Save per-sample model outputs (e.g. for GSM8K)",
+    ),
+    samples_output: str | None = typer.Option(
+        None,
+        "--samples-output",
+        help="Directory to save per-sample JSONL files (requires --log-samples)",
+    ),
 ) -> None:
     """Run validation benchmarks on a model using lm-evaluation-harness."""
     import os
@@ -719,6 +729,8 @@ def validate(
         mem_fraction=mem_fraction,
         tp_size=tp_size,
         dp_size=dp_size,
+        log_samples=log_samples,
+        samples_output_dir=samples_output,
     )
 
     out = save_validation(results, output, model_name=model)
