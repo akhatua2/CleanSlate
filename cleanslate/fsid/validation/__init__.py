@@ -50,6 +50,8 @@ def run_validation(
     mem_fraction: float = 0.85,
     tp_size: int = 1,
     dp_size: int = 1,
+    log_samples: bool = False,
+    samples_output_dir: str | None = None,
 ) -> dict[str, BenchmarkResult]:
     """Run validation benchmarks using lm-evaluation-harness with SGLang backend.
 
@@ -85,11 +87,25 @@ def run_validation(
         num_fewshot=num_fewshot,
         limit=limit,
         batch_size=batch_size,
-        log_samples=False,
+        log_samples=log_samples,
     )
 
     elapsed = time.time() - t0
     raw_results: dict[str, Any] = eval_results.get("results", {})
+
+    # Save per-sample outputs if requested
+    if log_samples and samples_output_dir and "samples" in eval_results:
+        import json
+        from pathlib import Path
+
+        out_dir = Path(samples_output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for task_name, samples in eval_results["samples"].items():
+            sample_path = out_dir / f"{task_name}_samples.jsonl"
+            with open(sample_path, "w") as f:
+                for s in samples:
+                    f.write(json.dumps(s, default=str) + "\n")
+            logger.info("Saved %d samples to %s", len(samples), sample_path)
 
     return _parse_results(
         raw_results=raw_results,
