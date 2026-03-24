@@ -222,12 +222,14 @@ def compute_score(
     pre_ids = set(pre_by_id.keys())
     post_ids = set(post_by_id.keys())
     if pre_ids != post_ids:
-        missing_from_post = sorted(pre_ids - post_ids)[:5]
-        missing_from_pre = sorted(post_ids - pre_ids)[:5]
-        raise ValueError(
-            "pre-eval and post-eval must cover the exact same content universe. "
-            f"Missing from post: {missing_from_post}; missing from pre: {missing_from_pre}"
-        )
+        # Narrow to shared IDs so partial post-evals can still be scored.
+        shared = pre_ids & post_ids
+        if not shared:
+            raise ValueError("pre-eval and post-eval share no content IDs.")
+        pre_by_id = {k: v for k, v in pre_by_id.items() if k in shared}
+        post_by_id = {k: v for k, v in post_by_id.items() if k in shared}
+        pre_ids = shared
+        post_ids = shared
 
     missing_forget = forget_ids - pre_ids
     if missing_forget:

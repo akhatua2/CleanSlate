@@ -33,3 +33,4 @@ conda_env_setup.sh
 # Books data cache (raw Gutenberg downloads + parquet)
 scripts/books-data/cache/
 scripts/books-data/*.parquet
+tables/

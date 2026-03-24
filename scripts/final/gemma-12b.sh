@@ -78,7 +78,7 @@ for OBJ in simnpo; do
             --retain-path "${CURATED_DIR}/retain_set.parquet" \
             -o "${UNLEARN_DIR}/${OBJ}" \
             --gradient-checkpointing \
-            --batch-size 1 --grad-accum 8 --epochs 1
+            --batch-size 1 --grad-accum 8 --epochs 2
     fi
 done
 
