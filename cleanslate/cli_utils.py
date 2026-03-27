@@ -139,16 +139,15 @@ def shutdown_gpu_handles(gpu_handles: dict[int, Any]) -> None:
 
 
 def estimate_windows(text: str, window_size: int, stride: int) -> int:
-    """Estimate number of windows for a text (rough, uses char-based estimation).
+    """Estimate number of windows for a text.
 
-    Uses ~4 chars per token as rough estimate to avoid loading tokenizer.
+    Window size and stride are in characters, so this is exact.
     """
-    chars_per_token = 4  # Rough estimate
-    approx_tokens = len(text) // chars_per_token
+    total_chars = len(text)
     window_total = window_size * 2  # prefix + suffix
-    if approx_tokens < window_total:
+    if total_chars < window_total:
         return 0
-    return max(1, (approx_tokens - window_total) // stride + 1)
+    return max(1, (total_chars - window_total) // stride + 1)
 
 
 def greedy_bin_pack(items: list[tuple[int, int]], num_bins: int) -> list[list[int]]:

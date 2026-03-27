@@ -59,10 +59,10 @@ class MemorizationConfig:
     # Reproduction detection
     reproduction_threshold: float = 0.7  # ROUGE-L threshold for "reproduced"
 
-    # Sliding window settings
-    window_prefix_len: int = 50  # Tokens
-    window_suffix_len: int = 50  # Tokens
-    window_stride: int = 25  # Tokens
+    # Sliding window settings (character-based)
+    window_prefix_len: int = 200  # Characters
+    window_suffix_len: int = 200  # Characters
+    window_stride: int = 100  # Characters
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -912,53 +912,38 @@ class MemorizationEvaluator:
         )
 
     def _generate_windows(self, text: str) -> list[WindowInfo]:
-        """Generate sliding windows over text."""
+        """Generate sliding windows over text using character-based boundaries.
+
+        Windows are defined in character space, then tokenized. This avoids
+        multi-byte character corruption that occurs when splitting in token
+        space and decoding independently.
+        """
         config = self.config
         tokenizer = self.tokenizer
-
-        # Tokenize with offset mapping for fast char position lookup
-        # This avoids O(n) decode calls - offsets come directly from tokenizer
-        try:
-            encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-            tokens = encoding["input_ids"]
-            offsets = encoding["offset_mapping"]  # List of (start_char, end_char) per token
-        except Exception:
-            # Fallback for tokenizers that don't support offset_mapping
-            tokens = tokenizer.encode(text, add_special_tokens=False)
-            offsets = None
-
-        total_tokens = len(tokens)
+        total_chars = len(text)
 
         window_size = config.window_prefix_len + config.window_suffix_len
-        if total_tokens < window_size:
+        if total_chars < window_size:
             logger.warning(
-                "Text too short (%d tokens) for window size (%d). Skipping.",
-                total_tokens,
+                "Text too short (%d chars) for window size (%d). Skipping.",
+                total_chars,
                 window_size,
             )
             return []
 
         windows: list[WindowInfo] = []
 
-        for start_token in range(
-            0, total_tokens - window_size + 1, config.window_stride
+        for start_char in range(
+            0, total_chars - window_size + 1, config.window_stride
         ):
-            prefix_end = start_token + config.window_prefix_len
-            suffix_end = prefix_end + config.window_suffix_len
+            split_char = start_char + config.window_prefix_len
+            end_char = split_char + config.window_suffix_len
 
-            prefix_ids = tokens[start_token:prefix_end]
-            suffix_ids = tokens[prefix_end:suffix_end]
+            prefix_text = text[start_char:split_char]
+            suffix_text = text[split_char:end_char]
 
-            prefix_text = tokenizer.decode(prefix_ids)
-            suffix_text = tokenizer.decode(suffix_ids)
-
-            # Get character positions from offset mapping (fast) or estimate
-            if offsets is not None:
-                start_char = offsets[start_token][0]
-                end_char = offsets[suffix_end - 1][1]
-            else:
-                start_char = 0
-                end_char = 0
+            prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
+            suffix_ids = tokenizer.encode(suffix_text, add_special_tokens=False)
 
             windows.append(
                 WindowInfo(
@@ -966,7 +951,7 @@ class MemorizationEvaluator:
                     suffix=suffix_text,
                     start_char=start_char,
                     end_char=end_char,
-                    start_token=start_token,
+                    start_token=0,
                     prefix_token_ids=prefix_ids,
                     suffix_token_ids=suffix_ids,
                 )

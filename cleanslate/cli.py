@@ -163,10 +163,10 @@ def eval(
     ),
     # Sliding window settings
     window_size: int = typer.Option(
-        50, "--window-size", "-w", help="Window size in tokens (prefix and suffix each)"
+        200, "--window-size", "-w", help="Window size in characters (prefix and suffix each)"
     ),
     stride: int = typer.Option(
-        25, "--stride", help="Stride in tokens (default: half of window_size)"
+        100, "--stride", help="Stride in characters (default: half of window_size)"
     ),
     # Compute settings
     threshold: float = typer.Option(
@@ -204,6 +204,9 @@ def eval(
     # Legacy generation params (used for sampling strategy in future)
     temperature: float = typer.Option(
         0.0, "--temperature", help="Generation temperature (0 = greedy). Currently unused with --decode."
+    ),
+    gen_max_tokens: int = typer.Option(
+        50, "--gen-max-tokens", help="Max tokens to generate per window for reproduction check"
     ),
     gen_top_k: int = typer.Option(40, "--gen-top-k", help="Top-k for generation. Currently unused with --decode."),
     capture_top_k: int = typer.Option(
@@ -322,8 +325,8 @@ def eval(
     console.print(f"[bold]Dataset:[/bold] {hf_dataset} / {hf_config}")
     console.print(f"[bold]Model:[/bold] {model_path}")
     console.print(f"[bold]Backend:[/bold] {backend}")
-    console.print(f"[bold]Window:[/bold] {window_size} tokens prefix + {window_size} tokens suffix")
-    console.print(f"[bold]Stride:[/bold] {stride} tokens")
+    console.print(f"[bold]Window:[/bold] {window_size} chars prefix + {window_size} chars suffix")
+    console.print(f"[bold]Stride:[/bold] {stride} chars")
     console.print(f"[bold]Reproduce:[/bold] {reproduce}")
     if reproduce:
         strategy_info = f"{decode_strategy}"
@@ -397,7 +400,7 @@ def eval(
         do_generate=reproduce,
         gen_temperature=temperature,
         gen_top_k=gen_top_k,
-        gen_max_new_tokens=window_size,  # Generate same length as suffix
+        gen_max_new_tokens=gen_max_tokens,  # Approx tokens for suffix length
         gen_do_sample=(temperature > 0),
         capture_top_k=capture_top_k,
         # Decoding strategy
@@ -681,7 +684,7 @@ def eval(
                     decode_outputs = evaluator._get_backend().generate_batch(
                         window_seeds,
                         strategy=strategy,
-                        max_new_tokens=window_size,
+                        max_new_tokens=gen_max_tokens,
                         capture_top_k=capture_top_k,
                     )
                     for w, decode_output in zip(sw_result.windows, decode_outputs):
@@ -691,7 +694,7 @@ def eval(
                     decode_output = evaluator._get_backend().generate(
                         best_window.seed,
                         strategy=strategy,
-                        max_new_tokens=window_size,
+                        max_new_tokens=gen_max_tokens,
                         capture_top_k=capture_top_k,
                     )
                     gen_results_map[best_window_idx] = compute_beam_metrics(decode_output, best_window.target)
@@ -940,9 +943,9 @@ def probe(
         "sglang", "--backend", "-b", help="Backend: sglang or huggingface"
     ),
     window_size: int = typer.Option(
-        50, "--window-size", "-w", help="Window size in tokens"
+        200, "--window-size", "-w", help="Window size in characters"
     ),
-    stride: int = typer.Option(25, "--stride", help="Stride in tokens"),
+    stride: int = typer.Option(100, "--stride", help="Stride in characters"),
 ):
     """Quick sliding window probe on a text string."""
     config = MemorizationConfig(
