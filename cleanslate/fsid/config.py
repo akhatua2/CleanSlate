@@ -44,8 +44,8 @@ class TrainerConfig:
 
     forget_text_col: str = "lyrics"
     retain_text_col: str = "lyrics"
-    window_size: int = 50
-    stride: int = 25
+    window_size: int = 200  # Characters (prefix and suffix each)
+    stride: int = 100  # Characters
     max_windows_per_song: int | None = 64
     max_seq_len: int = 512
     max_forget_pairs: int | None = None
@@ -143,10 +143,9 @@ class TrainerConfig:
             raise ValueError("stride must be >= 1")
         if self.max_seq_len < 8:
             raise ValueError("max_seq_len must be >= 8")
-        if self.max_seq_len <= self.window_size:
-            raise ValueError(
-                "max_seq_len must be > window_size to yield non-empty forget targets"
-            )
+        # window_size is in characters; max_seq_len is in tokens.
+        # No cross-unit validation here — the actual token count of a
+        # character window depends on the tokenizer.
         if self.max_windows_per_song is not None and self.max_windows_per_song < 1:
             raise ValueError("max_windows_per_song must be >= 1 when set")
         if self.max_forget_pairs is not None and self.max_forget_pairs < 1:

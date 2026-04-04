@@ -65,8 +65,13 @@ def build_forget_pairs(
     max_windows_per_song: int | None,
     max_seq_len: int,
 ) -> list[dict[str, Any]]:
-    """Create local forget training pairs from lyrics via sliding windows."""
-    window_total = window_size * 2
+    """Create local forget training pairs from lyrics via sliding windows.
+
+    Windows are defined in character space, then tokenized. This avoids
+    multi-byte character corruption that occurs when splitting in token
+    space and decoding independently.
+    """
+    window_total = window_size * 2  # prefix chars + suffix chars
     pairs: list[dict[str, Any]] = []
 
     for row in forget_rows:
@@ -80,11 +85,11 @@ def build_forget_pairs(
         if not isinstance(text, str) or not text.strip():
             continue
 
-        token_ids = tokenizer.encode(text, add_special_tokens=False)
-        if len(token_ids) < window_total:
+        total_chars = len(text)
+        if total_chars < window_total:
             continue
 
-        starts = list(range(0, len(token_ids) - window_total + 1, stride))
+        starts = list(range(0, total_chars - window_total + 1, stride))
         if max_windows_per_song is not None and len(starts) > max_windows_per_song:
             step = len(starts) / max_windows_per_song
             starts = [
@@ -92,11 +97,13 @@ def build_forget_pairs(
                 for index in range(max_windows_per_song)
             ]
 
-        for start in starts:
-            prefix = token_ids[start : start + window_size]
-            suffix = token_ids[start + window_size : start + window_total]
-            input_ids = (prefix + suffix)[:max_seq_len]
-            seed_len = min(len(prefix), len(input_ids) - 1)
+        for start_char in starts:
+            prefix_text = text[start_char : start_char + window_size]
+            suffix_text = text[start_char + window_size : start_char + window_total]
+            prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
+            suffix_ids = tokenizer.encode(suffix_text, add_special_tokens=False)
+            input_ids = (prefix_ids + suffix_ids)[:max_seq_len]
+            seed_len = min(len(prefix_ids), len(input_ids) - 1)
             if seed_len <= 0 or len(input_ids) <= seed_len:
                 continue
 
