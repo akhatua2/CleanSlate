@@ -10,8 +10,8 @@ retain_weight: 1.0
 retain_loss_type: nll
 forget_text_col: lyrics
 retain_text_col: text
-window_size: 200          # characters (prefix and suffix each)
-stride: 100               # characters
+window_size: 100          # characters (prefix and suffix each)
+stride: 10                # characters
 max_windows_per_song: 64
 max_seq_len: 512
 num_epochs: 2             # more passes over forget set

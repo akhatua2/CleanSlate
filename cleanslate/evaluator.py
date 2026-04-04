@@ -60,9 +60,9 @@ class MemorizationConfig:
     reproduction_threshold: float = 0.7  # ROUGE-L threshold for "reproduced"
 
     # Sliding window settings (character-based)
-    window_prefix_len: int = 200  # Characters
-    window_suffix_len: int = 200  # Characters
-    window_stride: int = 100  # Characters
+    window_prefix_len: int = 100  # Characters
+    window_suffix_len: int = 100  # Characters
+    window_stride: int = 10  # Characters
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -981,17 +981,23 @@ class MemorizationEvaluator:
     def _compute_heatmap(
         self, windows: list[MemorizationResult], text_len: int
     ) -> list[float]:
-        """Compute max p_z at each character position."""
+        """Compute max p_z at each character position (suffix region only).
+
+        Only characters in the suffix (target) portion of each window get
+        the window's p_z. The prefix (seed) region is excluded because p_z
+        measures extraction probability of the suffix given the prefix.
+        """
         if not windows or text_len == 0:
             return []
 
         char_max_pz = [0.0] * text_len
+        prefix_len = self.config.window_prefix_len
 
         for w in windows:
             if w.window_start_char is not None:
-                start = w.window_start_char
+                suffix_start = w.window_start_char + prefix_len
                 end = min(w.window_end_char or text_len, text_len)
-                for i in range(start, end):
+                for i in range(suffix_start, end):
                     char_max_pz[i] = max(char_max_pz[i], w.p_z)
 
         return char_max_pz

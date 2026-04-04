@@ -44,8 +44,8 @@ class TrainerConfig:
 
     forget_text_col: str = "lyrics"
     retain_text_col: str = "lyrics"
-    window_size: int = 200  # Characters (prefix and suffix each)
-    stride: int = 100  # Characters
+    window_size: int = 100  # Characters (prefix and suffix each)
+    stride: int = 10  # Characters
     max_windows_per_song: int | None = 64
     max_seq_len: int = 512
     max_forget_pairs: int | None = None

@@ -163,10 +163,10 @@ def eval(
     ),
     # Sliding window settings
     window_size: int = typer.Option(
-        200, "--window-size", "-w", help="Window size in characters (prefix and suffix each)"
+        100, "--window-size", "-w", help="Window size in characters (prefix and suffix each)"
     ),
     stride: int = typer.Option(
-        100, "--stride", help="Stride in characters (default: half of window_size)"
+        10, "--stride", help="Stride in characters"
     ),
     # Compute settings
     threshold: float = typer.Option(
@@ -199,7 +199,7 @@ def eval(
         1.0, "--length-penalty", help="Length penalty for beam search (1.0 = linear, 0.0 = none)"
     ),
     max_batch_prompts: int = typer.Option(
-        64, "--max-batch-prompts", help="Max prompts per SGLang engine call for compute/generate. Reduce if OOM (default: 64)"
+        100000, "--max-batch-prompts", help="Max prompts per SGLang engine call. SGLang handles scheduling internally."
     ),
     # Legacy generation params (used for sampling strategy in future)
     temperature: float = typer.Option(
@@ -283,7 +283,7 @@ def eval(
                     console.print(f"[red]Error: --gpu-ids has {len(gpus)} GPUs but --num-gpus is {num_gpus}[/red]")
                     raise typer.Exit(1)
                 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
-            else:
+            elif "CUDA_VISIBLE_DEVICES" not in os.environ:
                 gpus = list(range(num_gpus))
                 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
             # Continue to single-process eval with dp_size set below
@@ -602,6 +602,8 @@ def eval(
                     "beam_width": beam_width if decode_strategy == "beam" and reproduce else None,
                     "length_penalty": length_penalty if decode_strategy == "beam" and reproduce else None,
                     "reproduce_all_windows": reproduce_all,
+                    # Per-character max p_z heatmap (suffix-only)
+                    "char_to_max_pz": sw_result.char_to_max_pz,
                     # All windows (array)
                     "windows": windows_array,
                 }
@@ -943,9 +945,9 @@ def probe(
         "sglang", "--backend", "-b", help="Backend: sglang or huggingface"
     ),
     window_size: int = typer.Option(
-        200, "--window-size", "-w", help="Window size in characters"
+        100, "--window-size", "-w", help="Window size in characters"
     ),
-    stride: int = typer.Option(100, "--stride", help="Stride in characters"),
+    stride: int = typer.Option(10, "--stride", help="Stride in characters"),
 ):
     """Quick sliding window probe on a text string."""
     config = MemorizationConfig(
