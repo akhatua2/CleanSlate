@@ -38,6 +38,10 @@ cleanslate eval \
   -m "Qwen/Qwen3-8B" \
   -n 100 \
   -o results/eval
+
+# Validation benchmarks (requires lm-eval extra)
+cleanslate validate -m "Qwen/Qwen3-8B" -B mmlu,hellaswag
+cleanslate validate -m qwen-8b --compare results/validation/qwen3-8b.json
 ```
 
 ### Code Quality
@@ -104,8 +108,9 @@ Single backend: **vLLM** (requires vllm >= 0.19.0).
 
 **Entry point**: `cleanslate = "cleanslate.cli:main"`
 
-- `main.py`: Typer app setup, registers `eval` command
+- `main.py`: Typer app setup, registers `eval` and `validate` commands
 - `eval.py`: `eval_cmd()` — loads HF dataset, filters items, runs `sliding_window_batch()`, saves to Parquet, optionally pushes to HF Hub
+- `validate.py`: `validate_cmd()` — runs lm-eval benchmarks via vLLM, displays results table, saves JSON, optionally compares with a previous run
   - Options: `-d` (HF dataset), `-c` (HF config), `--text-col`, `-n` (limit), `--offset`, `-m` (model), `-o` (output dir), `--hf-org`, `--no-push`, `--config` (YAML path)
   - Default dataset: `unlearning-cleanslate/cleanslate_dataset`
   - Metadata columns: `content_id`, `content_title`, `content_creators`, `content_year`
