@@ -19,16 +19,16 @@ FSID (Forget Set IDentification) unlearning pipeline is planned but not yet impl
 
 ### Setup
 ```bash
-pip install -e .
+uv sync
 
 # For unlearning (adds peft/LoRA + accelerate):
-pip install -e ".[unlearning]"
+uv sync --extra unlearning
 
 # For validation benchmarks (adds lm-eval):
-pip install -e ".[eval]"
+uv sync --extra eval
 
 # For development (ruff, mypy, pytest):
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ### Primary CLI
@@ -146,7 +146,7 @@ Placeholder — unlearning pipeline planned but not yet implemented in v2.
 **Validation** (`[eval]`): `lm-eval==0.4.11`
 **Dev** (`[dev]`): `ruff`, `mypy`, `pytest`
 
-Requires Python >=3.12. Uses `hatchling` build backend.
+Requires Python >=3.12. Uses `hatchling` build backend. Managed with `uv` (lockfile: `uv.lock`).
 
 ## Development Notes
 
