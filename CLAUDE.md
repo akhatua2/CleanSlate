@@ -41,6 +41,7 @@ cleanslate eval \
 
 # Validation benchmarks (requires lm-eval extra)
 cleanslate validate -m "Qwen/Qwen3-8B" -B mmlu,hellaswag
+cleanslate validate -m qwen-8b -B cleanslate_qa
 cleanslate validate -m qwen-8b --compare results/validation/qwen3-8b.json
 ```
 
@@ -136,6 +137,11 @@ Integration with lm-evaluation-harness for benchmark validation.
 - `save_validation()`, `load_validation()` — JSON persistence
 - `compare_validations()` — returns list of `ValidationDelta` (pre/post accuracy comparison)
 - `ValidationDelta` (dataclass in `results.py`): `benchmark_name`, `pre_accuracy`, `post_accuracy`, `delta_accuracy`, `relative_retention`
+- `judge.py`: `is_correct(reference, model_answer)` — binary QA judging via Gemini (`gemini-3.1-flash-lite-preview`) through LiteLLM. Requires `GEMINI_API_KEY` env var.
+
+**Custom lm-eval tasks** (`validation/tasks/`):
+- `cleanslate_qa.yaml` — QA benchmark against `unlearning-cleanslate/cleanslate_dataset` (config: `qa_benchmark`). Uses `llm_judge_match` as the sole metric (Gemini-based semantic answer matching).
+- `utils.py` — `llm_judge_match(references, predictions)` metric function for lm-eval
 
 ### FSID Module (`cleanslate/fsid/`)
 
@@ -144,7 +150,7 @@ Placeholder — unlearning pipeline planned but not yet implemented in v2.
 ## Dependencies
 
 **Core** (always installed): `vllm==0.19.0`, `torch==2.10.0`, `transformers==4.57.6`, `pyarrow==23.0.1`, `pyyaml==6.0.3`, `datasets==4.7.0`, `typer==0.24.1`, `rich==14.3.3`, `tqdm==4.67.3`
-**Validation** (`[eval]`): `lm-eval==0.4.11`
+**Validation** (`[eval]`): `lm-eval==0.4.11`, `litellm`
 **Dev** (`[dev]`): `ruff`, `mypy`, `pytest`
 
 Requires Python 3.12. Uses `hatchling` build backend. Managed with `uv` (lockfile: `uv.lock`).

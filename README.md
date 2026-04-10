@@ -66,6 +66,9 @@ cleanslate validate -m "Qwen/Qwen3-8B"
 # Specific benchmarks with a sample limit for quick testing
 cleanslate validate -m qwen-8b -B mmlu,gsm8k -n 100
 
+# CleanSlate QA benchmark (LLM judge via Gemini, requires GEMINI_API_KEY)
+cleanslate validate -m qwen-8b -B cleanslate_qa
+
 # Compare against a previous run
 cleanslate validate -m qwen-8b --compare results/validation/qwen3-8b.json
 
