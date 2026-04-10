@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import lm_eval  # type: ignore[import-untyped]
+from lm_eval.tasks import TaskManager  # type: ignore[import-untyped]
 
 from cleanslate.validation.base import BenchmarkResult, SubsetResult
+
+_TASKS_DIR = str(Path(__file__).parent / "tasks")
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,8 @@ def run_validation(
         f"trust_remote_code=True"
     )
 
+    task_manager = TaskManager(include_path=_TASKS_DIR)
+
     raw: dict[str, Any] = lm_eval.simple_evaluate(
         model="vllm",
         model_args=model_args,
@@ -57,6 +63,7 @@ def run_validation(
         num_fewshot=num_fewshot,
         limit=limit,
         batch_size=batch_size,
+        task_manager=task_manager,
     )
 
     elapsed = time.time() - t0
