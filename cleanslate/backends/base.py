@@ -151,6 +151,24 @@ class InferenceBackend(ABC):
             self.compute(seed, target, **decoding_options) for seed, target in pairs
         ]
 
+    async def compute_batch_async(
+        self,
+        pairs: list[tuple[str, str]],
+        **decoding_options,
+    ) -> list[ProbabilityResult]:
+        """Async variant of :meth:`compute_batch`.
+
+        Default implementation calls the synchronous ``compute_batch`` in a
+        thread so callers can ``await`` it. Backends with native async APIs
+        (e.g. SGLang) should override this to return as soon as their
+        scheduler can accept the next chunk.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.compute_batch, pairs, **decoding_options
+        )
+
     @abstractmethod
     def generate(
         self,

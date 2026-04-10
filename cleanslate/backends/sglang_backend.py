@@ -14,6 +14,7 @@ Requires: pip install cleanslate[sglang]  (or uv sync --extra sglang)
 Important: Scripts using this backend MUST use `if __name__ == '__main__':` guard.
 """
 
+import asyncio
 import json
 import logging
 import math
@@ -121,16 +122,7 @@ class SGLangBackend(InferenceBackend):
         if not pairs:
             return []
 
-        # Build batch: full texts + per-prompt logprob_start_len
-        prompts: list[str] = []
-        seed_lens: list[int] = []
-        for seed, target in pairs:
-            seed_ids = self.tokenizer.encode(seed, add_special_tokens=True)
-            prompts.append(seed + target)
-            seed_lens.append(len(seed_ids))
-
-        # logprob_start_len one position early so the None falls on last seed token
-        logprob_starts = [max(0, sl - 1) for sl in seed_lens]
+        prompts, seed_lens, logprob_starts = self._prepare_logprob_inputs(pairs)
 
         # Process in chunks to avoid OOM on large batches
         out: list[ProbabilityResult] = []
@@ -152,6 +144,67 @@ class SGLangBackend(InferenceBackend):
                 out.append(self._parse_logprobs(raw, batch_seed_lens[i], batch_logprob_starts[i]))
 
         return out
+
+    async def compute_batch_async(
+        self,
+        pairs: list[tuple[str, str]],
+        max_batch_size: int = 64,
+        **decoding_options: Any,
+    ) -> list[ProbabilityResult]:
+        """Async variant of :meth:`compute_batch`.
+
+        Uses ``engine.async_generate`` so the caller can submit the next
+        chunk while the GPU is still processing the previous one. SGLang's
+        continuous batching scheduler keeps all in-flight requests packed
+        on-device, so this is the right primitive to keep the GPU saturated.
+        """
+        if not pairs:
+            return []
+
+        prompts, seed_lens, logprob_starts = self._prepare_logprob_inputs(pairs)
+
+        out: list[ProbabilityResult] = [None] * len(prompts)  # type: ignore[list-item]
+
+        async def _run_chunk(start: int, end: int) -> None:
+            batch_prompts = prompts[start:end]
+            batch_seed_lens = seed_lens[start:end]
+            batch_logprob_starts = logprob_starts[start:end]
+            results_raw = await self.engine.async_generate(
+                prompt=batch_prompts,
+                sampling_params=[{"max_new_tokens": 0, "temperature": 0}] * len(batch_prompts),
+                return_logprob=[True] * len(batch_prompts),
+                logprob_start_len=batch_logprob_starts,
+                top_logprobs_num=[1] * len(batch_prompts),
+            )
+            # async_generate returns a list when given a list of prompts
+            if isinstance(results_raw, dict):
+                results_raw = [results_raw]
+            for i, raw in enumerate(results_raw):
+                out[start + i] = self._parse_logprobs(
+                    raw, batch_seed_lens[i], batch_logprob_starts[i]
+                )
+
+        tasks = [
+            _run_chunk(s, min(s + max_batch_size, len(prompts)))
+            for s in range(0, len(prompts), max_batch_size)
+        ]
+        await asyncio.gather(*tasks)
+        return out
+
+    def _prepare_logprob_inputs(
+        self, pairs: list[tuple[str, str]]
+    ) -> tuple[list[str], list[int], list[int]]:
+        """Tokenize seeds and build the (prompts, seed_lens, logprob_starts)
+        tuple shared by the sync and async batch paths."""
+        prompts: list[str] = []
+        seed_lens: list[int] = []
+        for seed, target in pairs:
+            seed_ids = self.tokenizer.encode(seed, add_special_tokens=True)
+            prompts.append(seed + target)
+            seed_lens.append(len(seed_ids))
+        # logprob_start_len one position early so the None falls on last seed token
+        logprob_starts = [max(0, sl - 1) for sl in seed_lens]
+        return prompts, seed_lens, logprob_starts
 
     # ------------------------------------------------------------------
     # Generation (strategy-based)
