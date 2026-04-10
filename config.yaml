@@ -1,11 +1,14 @@
 eval:
   window_prefix_len: 100  # chars
   window_suffix_len: 100  # chars
-  window_stride: 10       # chars
+  window_stride: 10      # chars
   tau_min: 0.001          # p_z threshold for "memorized"
+  batch_size: 256         # windows per vLLM batch
 
 vllm:
-  num_gpus: 1              # number of GPUs (tensor parallelism)
-  gpu_memory_utilization: 0.90
+  num_gpus: 1             # TP size per DP rank
+  data_parallel: 2         # number of DP ranks (model replicas)
+  gpu_memory_utilization: 0.95
   max_model_len: 4096
   dtype: bfloat16
+  enforce_eager: false

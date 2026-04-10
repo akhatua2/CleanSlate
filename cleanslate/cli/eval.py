@@ -82,7 +82,8 @@ def eval_cmd(
     texts = [item[text_col] for _, item in valid]
     names = [_get_item_name(item) for _, item in valid]
 
-    sw_results = evaluator.sliding_window_batch(texts=texts, names=names)
+    batch_size = eval_cfg.get("batch_size", 256)
+    sw_results = evaluator.sliding_window_batch(texts=texts, names=names, batch_size=batch_size)
 
     all_records: list[dict[str, Any]] = []
     total_windows = 0
@@ -126,10 +127,47 @@ def eval_cmd(
     out_path = Path(output_dir) / hf_config / model_clean
     out_path.mkdir(parents=True, exist_ok=True)
 
+    import json
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     pq.write_table(pa.Table.from_pylist(all_records), out_path / "results.parquet")
+
+    # Human-readable summary
+    pzs = [r["max_p_z"] for r in all_records]
+    summary = {
+        "model": model_path,
+        "model_alias": model,
+        "dataset": hf_dataset,
+        "config": hf_config,
+        "num_items": len(all_records),
+        "total_windows": total_windows,
+        "memorized_windows": total_memorized,
+        "memorized_fraction": total_memorized / total_windows if total_windows > 0 else 0.0,
+        "p_z": {
+            "mean": statistics.mean(pzs) if pzs else 0.0,
+            "median": statistics.median(pzs) if pzs else 0.0,
+            "max": max(pzs) if pzs else 0.0,
+            "min": min(pzs) if pzs else 0.0,
+            "std": statistics.stdev(pzs) if len(pzs) > 1 else 0.0,
+        },
+        "eval_config": eval_cfg,
+        "per_item": [
+            {
+                "content_id": r.get("content_id"),
+                "content_title": r.get("content_title"),
+                "num_windows": r["num_windows"],
+                "memorized_windows": r["memorized_windows"],
+                "memorized_fraction": r["memorized_fraction"],
+                "max_p_z": r["max_p_z"],
+                "mean_p_z": r["mean_p_z"],
+                "coverage": r["coverage"],
+            }
+            for r in all_records
+        ],
+    }
+    with open(out_path / "summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
 
     if not no_push and all_records:
         from datasets import Dataset as HFDataset

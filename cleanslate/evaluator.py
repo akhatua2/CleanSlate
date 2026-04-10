@@ -188,8 +188,13 @@ class MemorizationEvaluator:
 
         pairs = [(w.prefix, w.suffix) for _, _, w in flat]
         probs: list[ProbabilityResult] = []
+        from tqdm import tqdm
+        pbar = tqdm(total=len(pairs), desc="Windows", unit="win")
         for i in range(0, len(pairs), batch_size):
-            probs.extend(backend.compute_batch(pairs[i : i + batch_size]))
+            batch = pairs[i : i + batch_size]
+            probs.extend(backend.compute_batch(batch))
+            pbar.update(len(batch))
+        pbar.close()
 
         grouped: dict[int, list[MemorizationResult]] = {i: [] for i in range(len(texts))}
         now = datetime.now().isoformat()

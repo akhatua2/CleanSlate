@@ -1,0 +1,14 @@
+eval:
+  window_prefix_len: 100  # chars
+  window_suffix_len: 100  # chars
+  window_stride: 10      # chars
+  tau_min: 0.001          # p_z threshold for "memorized"
+  batch_size: 256         # smaller batch for larger models
+
+vllm:
+  num_gpus: 2             # TP=2 (split model across both GPUs)
+  data_parallel: 1         # no DP for 32B models
+  gpu_memory_utilization: 0.95
+  max_model_len: 4096
+  dtype: bfloat16
+  enforce_eager: false

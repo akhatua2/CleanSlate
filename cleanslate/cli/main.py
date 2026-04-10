@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
+import os
+
 import typer
 from rich.console import Console
 
@@ -15,5 +18,16 @@ app.command(name="eval")(eval_cmd)
 app.command(name="validate")(validate_cmd)
 
 
+def _silence_stderr_at_exit() -> None:
+    """Suppress vLLM child-process ResourceTracker noise on shutdown."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except OSError:
+        pass
+
+
 def main() -> None:
+    atexit.register(_silence_stderr_at_exit)
     app()
