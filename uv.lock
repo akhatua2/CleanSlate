@@ -298,7 +298,7 @@ eval = [
 [package.metadata]
 requires-dist = [
     { name = "datasets", specifier = "==4.7.0" },
-    { name = "litellm", marker = "extra == 'eval'" },
+    { name = "litellm", marker = "extra == 'eval'", specifier = "==1.83.0" },
     { name = "lm-eval", marker = "extra == 'eval'", specifier = "==0.4.11" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "pyarrow", specifier = "==23.0.1" },
