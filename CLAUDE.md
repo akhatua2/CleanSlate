@@ -21,9 +21,6 @@ FSID (Forget Set IDentification) unlearning pipeline is planned but not yet impl
 ```bash
 uv sync
 
-# For unlearning (adds peft/LoRA + accelerate):
-uv sync --extra unlearning
-
 # For validation benchmarks (adds lm-eval):
 uv sync --extra eval
 
@@ -142,11 +139,10 @@ Placeholder — unlearning pipeline planned but not yet implemented in v2.
 ## Dependencies
 
 **Core** (always installed): `vllm==0.19.0`, `torch==2.10.0`, `transformers==4.57.6`, `pyarrow==23.0.1`, `pyyaml==6.0.3`, `datasets==4.7.0`, `typer==0.24.1`, `rich==14.3.3`, `tqdm==4.67.3`
-**Unlearning** (`[unlearning]`): `peft==0.18.1`, `accelerate==1.13.0`
 **Validation** (`[eval]`): `lm-eval==0.4.11`
 **Dev** (`[dev]`): `ruff`, `mypy`, `pytest`
 
-Requires Python >=3.12. Uses `hatchling` build backend. Managed with `uv` (lockfile: `uv.lock`).
+Requires Python 3.12. Uses `hatchling` build backend. Managed with `uv` (lockfile: `uv.lock`).
 
 ## Development Notes
 
