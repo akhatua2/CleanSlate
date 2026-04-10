@@ -26,11 +26,24 @@ logs/
 run_eval.sh
 conda_env_setup.sh
 
-# Data files (except scripts/books-data)
+# Data files
 *.parquet
-!scripts/books-data/*.parquet
 
-# Books data cache (raw Gutenberg downloads + parquet)
-scripts/books-data/cache/
-scripts/books-data/*.parquet
+# IDE / tools
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
 tables/

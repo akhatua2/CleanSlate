@@ -1,36 +1,24 @@
 [project]
 name = "cleanslate"
-version = "0.1.0"
-description = "Calculate probability of model outputs given seed tokens"
+version = "0.2.0"
+description = "Memorization evaluation and unlearning for LLMs"
 requires-python = ">=3.12"
 dependencies = [
-    "torch",
-    "transformers",
-    "accelerate",
-    "pyarrow>=23.0.0",
-    "fastparquet>=2025.12.0",
-    "ipykernel>=7.1.0",
-    "polars>=1.37.1",
-    "python-dotenv",
-    "pip3-autoremove>=2.0.1",
-    "datasets>=4.5.0",
-    "pyyaml>=6.0",
-    "pydantic>=2.12.5",
-    "ray>=2.54.0",
-    "litellm>=1.82.0",
-    "pybase64>=1.4.3",
-    "pillow>=12.1.1",
-    "uvloop>=0.22.1",
-    "fastapi>=0.135.1",
+    "vllm==0.19.0",
+    "torch==2.10.0",
+    "transformers==4.57.6",
+    "pyarrow==23.0.1",
+    "pyyaml==6.0.3",
+    "datasets==4.7.0",
+    "typer==0.24.1",
+    "rich==14.3.3",
+    "tqdm==4.67.3",
 ]
 
 [project.optional-dependencies]
-vllm = ["vllm"]
-sglang = ["sglang"]
-cli = ["typer", "rich"]
-export = ["pyarrow", "datasets"]
-unlearning = ["peft>=0.11.0"]
-eval = ["lm-eval"]
+unlearning = ["peft==0.18.1", "accelerate==1.13.0"]
+eval = ["lm-eval==0.4.11"]
+dev = ["ruff", "mypy", "pytest"]
 
 [project.scripts]
 cleanslate = "cleanslate.cli:main"
@@ -40,7 +28,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 
 [tool.mypy]
 strict = true
