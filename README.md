@@ -38,8 +38,6 @@ cleanslate eval \
 # Use a model alias
 cleanslate eval -m qwen-8b -n 50
 
-# Skip pushing results to HuggingFace Hub
-cleanslate eval -m llama-8b --no-push
 ```
 
 **Options:**

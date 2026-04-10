@@ -1,4 +1,4 @@
-task: cleanslate_qa_fast
+task: cleanslate_qa
 dataset_path: unlearning-cleanslate/cleanslate_dataset
 dataset_name: qa_benchmark
 test_split: train
