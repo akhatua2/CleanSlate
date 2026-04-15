@@ -34,3 +34,10 @@ conda_env_setup.sh
 scripts/books-data/cache/
 scripts/books-data/*.parquet
 tables/
+
+# Retrieval framework artifacts
+curation/checkpoints/
+curation/indices/
+curation/outputs/
+curation/temp/
+curation/vendor/
