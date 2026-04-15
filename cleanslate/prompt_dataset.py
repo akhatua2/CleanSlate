@@ -1,7 +1,5 @@
 """Build prompt-split datasets for lyrics generation."""
 
-from __future__ import annotations
-
 import hashlib
 from typing import Iterable
 

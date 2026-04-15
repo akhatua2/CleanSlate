@@ -1,7 +1,5 @@
 """Config and output schema for retrieval runs."""
 
-from __future__ import annotations
-
 from dataclasses import asdict, dataclass
 from hashlib import sha1
 import json

@@ -1,7 +1,5 @@
 """Backend registry and factory."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 import importlib
 from typing import Any

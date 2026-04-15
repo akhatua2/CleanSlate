@@ -1,7 +1,5 @@
 """Unified CLI for retrieval methods."""
 
-from __future__ import annotations
-
 import argparse
 
 from curation.retrieval.backend_bm25 import build_bm25_index

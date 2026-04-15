@@ -1,7 +1,5 @@
 """Sharded BM25 retrieval via bm25s."""
 
-from __future__ import annotations
-
 from bisect import bisect_left
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import heapq

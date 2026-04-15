@@ -48,8 +48,6 @@ Storage layout (under --dolma-dir):
 Where {tag} encodes the category subset (or empty for the full corpus).
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import heapq

@@ -30,8 +30,6 @@ Then evaluate each checkpoint with open-unlearning's eval:
         task_name=cleanslate_simnpo_verify
 """
 
-from __future__ import annotations
-
 import argparse
 import logging
 import time

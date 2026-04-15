@@ -1,7 +1,5 @@
 """Load CleanSlate queries as a Polars DataFrame."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import polars as pl

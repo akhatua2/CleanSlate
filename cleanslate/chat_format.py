@@ -1,7 +1,5 @@
 """Chat formatting utilities."""
 
-from __future__ import annotations
-
 
 def format_chat(
     tokenizer,

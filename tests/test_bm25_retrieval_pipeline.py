@@ -1,7 +1,5 @@
 """Integration tests for the BM25 retrieval pipeline."""
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from concurrent.futures import Future
