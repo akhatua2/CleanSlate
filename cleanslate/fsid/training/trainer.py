@@ -94,14 +94,20 @@ class CleanSlateUnlearnTrainer(Trainer):
         return 6 * total_tokens * num_params
 
     @staticmethod
-    def prepare_ref_model(config: TrainerConfig, accelerator: Any) -> Any:
+    def prepare_ref_model(
+        config: TrainerConfig, accelerator: Any, policy_dtype: torch.dtype
+    ) -> Any:
         """Load a separate frozen reference model from disk.
 
         Avoids deepcopy which materializes all FSDP shards on every rank,
         doubling peak memory.  Loading from disk lets each rank stay lean
         until FSDP re-shards the new model.
+
+        Explicitly casts to policy_dtype to prevent silent fp32/bf16 drift
+        in NPO log-prob subtraction.
         """
         ref_model = load_model(config)
+        ref_model = ref_model.to(dtype=policy_dtype)
         for param in ref_model.parameters():
             param.requires_grad = False
         # Let accelerator.prepare_model handle device placement via FSDP
@@ -352,9 +358,14 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
     # Create frozen ref model for NPO or KL retain loss
     needs_ref = config.objective == "npo" or config.retain_loss_type == "kl"
     if needs_ref:
-        logger.info("Creating frozen reference model for %s", config.objective)
+        policy_dtype = next(trainer.model.parameters()).dtype
+        logger.info(
+            "Creating frozen reference model for %s (dtype=%s)",
+            config.objective,
+            policy_dtype,
+        )
         trainer.ref_model = CleanSlateUnlearnTrainer.prepare_ref_model(
-            config, trainer.accelerator
+            config, trainer.accelerator, policy_dtype
         )
 
     # --- Train ---

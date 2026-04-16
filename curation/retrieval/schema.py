@@ -28,6 +28,7 @@ class Cfg:
     index_workers: int | None = None
     index_mem_gb: int = 256
     num_shards: int | None = None
+    num_index_shards: int = 1
     dolma_root: str | None = None
     curation_root: str | None = None
     dataset_path: str | None = None
@@ -74,6 +75,7 @@ class Cfg:
                 "min_segment_chars": self.min_segment_chars,
                 "categories": self.categories,
                 "num_shards": self.normalized_num_shards,
+                "num_index_shards": self.num_index_shards,
                 "normalization": {
                     "lower": True,
                     "stopwords": "english",

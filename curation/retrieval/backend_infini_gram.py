@@ -23,29 +23,45 @@ def load_engine(index_dir: Path, load_to_ram: bool = False):
     if engine_str not in sys.path:
         sys.path.insert(0, engine_str)
     from src.engine import InfiniGramMiniEngine  # type: ignore[import-untyped]
+    # Multi-shard layout: index_dir/shard_NNN/data.fm9. Single-shard: index_dir/data.fm9.
+    shard_dirs = sorted(index_dir.glob("shard_*"))
+    dirs = [str(d) for d in shard_dirs if (d / "data.fm9").exists()]
+    if not dirs:
+        dirs = [str(index_dir)]
     return InfiniGramMiniEngine(
-        index_dirs=[str(index_dir)], load_to_ram=load_to_ram, get_metadata=True,
+        index_dirs=dirs, load_to_ram=load_to_ram, get_metadata=True,
     )
 
 
 # -- Index building ----------------------------------------------------------
 
-def build_fm_index(cfg: Cfg) -> None:
-    """Build FM-index from raw Dolma shards. Idempotent: skips if data.fm9 exists."""
-    idx = cfg.index_dir
-    if (idx / "data.fm9").exists():
-        print(f"FM-index exists at {idx}, skipping.")
+_TRANSIENT_PATTERNS = ("sa_*.sdsl", "bwt_*.sdsl", "text_*.sdsl", "memory_traces.html")
+
+
+def _stage_shard_input(shard_dir: Path, raw_paths: list[Path], cfg_raw_data: Path) -> Path:
+    """Symlink the given raw shards into a staging dir so infini-gram-mini's
+    prepare() sees only this group. Preserves category dir structure."""
+    staging = shard_dir / "raw_staging"
+    if staging.exists():
+        return staging
+    staging.mkdir(parents=True)
+    for rp in raw_paths:
+        try:
+            rel = rp.relative_to(cfg_raw_data)
+        except ValueError:
+            rel = Path(rp.parent.name) / rp.name
+        link = staging / rel
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(rp)
+    return staging
+
+
+def _build_one_fm_shard(cfg: Cfg, raw_paths: list[Path], shard_dir: Path) -> None:
+    """Build one FM-index shard from the given raw .jsonl.zst files. Transient
+    SA/BWT/text files are deleted after fm9 is written."""
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    if (shard_dir / "data.fm9").exists() and (shard_dir / "meta.fm9").exists():
         return
-
-    shards = cfg.raw_shards()
-    if not shards:
-        raise FileNotFoundError(f"No .jsonl.zst in {cfg.raw_data}")
-
-    idx.mkdir(parents=True, exist_ok=True)
-    scratch = cfg.index_dir.parent / "temp_index"
-    scratch.mkdir(parents=True, exist_ok=True)
-
-    print(f"Building FM-index: {len(shards)} shards → {idx}")
 
     indexing_str = str(INDEXING_DIR)
     if indexing_str not in sys.path:
@@ -54,10 +70,11 @@ def build_fm_index(cfg: Cfg) -> None:
     import argparse as _ap
     from indexing import build_sa_bwt, prepare  # type: ignore[import-untyped]
 
+    data_dir = _stage_shard_input(shard_dir, raw_paths, cfg.raw_data)
     args = _ap.Namespace(
-        data_dir=str(cfg.raw_data),
-        save_dir=str(idx),
-        temp_dir=str(scratch),
+        data_dir=str(data_dir),
+        save_dir=str(shard_dir),
+        temp_dir=str(shard_dir),
         doc_sep=b"\xff",
         batch_size=65536,
         cpus=cfg.workers,
@@ -75,12 +92,57 @@ def build_fm_index(cfg: Cfg) -> None:
     prev_cwd = os.getcwd()
     os.chdir(str(INDEXING_DIR))
     binary = "./cpp_indexing_local" if (INDEXING_DIR / "cpp_indexing_local").exists() else "./cpp_indexing"
-    ret = os.system(f"{binary} {idx} 2>&1")
+    ret = os.system(f"{binary} {shard_dir} 2>&1")
     os.chdir(prev_cwd)
     if ret != 0:
         raise RuntimeError(f"{binary} failed with exit code {ret}")
 
-    print(f"FM-index complete: {idx}")
+    # Delete transient files — keep only *.fm9 + offsets
+    for pattern in _TRANSIENT_PATTERNS:
+        for f in shard_dir.glob(pattern):
+            f.unlink()
+    import shutil
+    shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def build_fm_index(cfg: Cfg) -> None:
+    """Build FM-index from raw Dolma shards. Sharded: splits corpus into
+    cfg.num_index_shards independent FM-indexes built sequentially, deleting
+    intermediates between shards. Idempotent per-shard."""
+    idx = cfg.index_dir
+    n = max(1, cfg.num_index_shards)
+
+    # Check if all shards already built
+    if n == 1 and (idx / "data.fm9").exists():
+        print(f"FM-index exists at {idx}, skipping.")
+        return
+    if n > 1 and all((idx / f"shard_{i:03d}" / "data.fm9").exists() for i in range(n)):
+        print(f"All {n} FM-index shards exist at {idx}, skipping.")
+        return
+
+    all_shards = cfg.raw_shards()
+    if not all_shards:
+        raise FileNotFoundError(f"No .jsonl.zst in {cfg.raw_data}")
+
+    idx.mkdir(parents=True, exist_ok=True)
+    print(f"Building FM-index: {len(all_shards)} raw shards → {idx} ({n} index shards)")
+
+    if n == 1:
+        _build_one_fm_shard(cfg, all_shards, idx)
+        print(f"FM-index complete: {idx}")
+        return
+
+    # Round-robin raw shards into N groups so each group has similar size
+    groups = [all_shards[i::n] for i in range(n)]
+    for shard_idx, group in enumerate(groups):
+        shard_dir = idx / f"shard_{shard_idx:03d}"
+        if (shard_dir / "data.fm9").exists():
+            print(f"  shard {shard_idx}/{n} already built, skipping")
+            continue
+        print(f"  shard {shard_idx}/{n}: {len(group)} raw shards → {shard_dir}")
+        _build_one_fm_shard(cfg, group, shard_dir)
+
+    print(f"FM-index complete: {n} shards at {idx}")
 
 
 # -- Span computation -------------------------------------------------------

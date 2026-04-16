@@ -204,30 +204,49 @@ def build_bm25_index(cfg: Cfg) -> None:
             for future in as_completed(futures):
                 future.result()
 
-    print(f"Segmentation done. Building BM25 indices on {cfg.normalized_num_shards} shards...")
+    print(f"Segmentation done. Compacting into {cfg.normalized_num_shards} shards...")
     shard_paths = [seg_dir / f"shard_{idx:03d}.parquet" for idx in range(cfg.normalized_num_shards)]
-    if not all(path.exists() for path in shard_paths):
+    need_compact = not all(path.exists() or (idx_dir / f"shard_{i:03d}" / "data.csc.index.npy").exists()
+                           for i, path in enumerate(shard_paths))
+    compacted_from: dict[int, list[Path]] = {}
+    if need_compact:
         writers: dict[int, pq.ParquetWriter] = {}
         try:
             for idx, seg_path in enumerate(sorted(seg_dir.glob("seg_*.parquet"))):
                 shard_idx = idx % cfg.normalized_num_shards
+                # Skip if this shard's bm25s index is already built
+                if (idx_dir / f"shard_{shard_idx:03d}" / "data.csc.index.npy").exists():
+                    continue
                 shard_path = shard_paths[shard_idx]
                 if shard_idx not in writers:
                     writers[shard_idx] = pq.ParquetWriter(shard_path, SEGMENT_SCHEMA, compression="zstd")
                 writers[shard_idx].write_table(pq.read_table(seg_path))
+                compacted_from.setdefault(shard_idx, []).append(seg_path)
         finally:
             for writer in writers.values():
                 writer.close()
 
+        # Delete seg_*.parquet files that have been compacted
+        for shard_idx, sources in compacted_from.items():
+            for seg_path in sources:
+                seg_path.unlink(missing_ok=True)
+
+    print(f"Building BM25 indices on {cfg.normalized_num_shards} shards...")
     tasks = [
         (str(shard_path), str(idx_dir / f"shard_{shard_idx:03d}"))
         for shard_idx, shard_path in enumerate(shard_paths)
         if shard_path.exists()
     ]
     with ProcessPoolExecutor(max_workers=cfg.normalized_index_workers) as pool:
-        futures = [pool.submit(_build_one_shard_index, task) for task in tasks]
+        futures = {pool.submit(_build_one_shard_index, task): task for task in tasks}
         for future in as_completed(futures):
             future.result()
+
+    # Delete compacted shard parquets now that bm25s indexes are built (bm25s
+    # embeds the corpus in its own index).
+    for shard_idx, shard_path in enumerate(shard_paths):
+        if shard_path.exists() and (idx_dir / f"shard_{shard_idx:03d}" / "data.csc.index.npy").exists():
+            shard_path.unlink()
 
     print(f"BM25 index complete: {idx_dir}")
 

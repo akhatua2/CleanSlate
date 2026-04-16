@@ -1,35 +1,48 @@
 """Data utilities for FSID unlearning with HF Trainer, ported from open-unlearning."""
 
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from torch.utils.data import Dataset as TorchDataset
 
 
 class ForgetRetainDataset(TorchDataset):
-    """Pairs forget + retain samples, anchoring on forget set length.
+    """Pairs forget + retain samples with random sampling.
 
-    Follows open-unlearning's ForgetRetainDataset pattern: each __getitem__
-    returns a dict with "forget" and "retain" sub-dicts. Retain indices
-    wrap around if the retain set is smaller than the forget set.
+    Follows open-unlearning's ForgetRetainDataset: anchors on one dataset,
+    randomly samples from the other. Random sampling avoids deterministic
+    pairing that can overfit retain regularization on small retain sets.
     """
 
     def __init__(
         self,
         forget_dataset: TorchDataset,
         retain_dataset: TorchDataset | None = None,
+        anchor: Literal["forget", "retain"] = "forget",
     ) -> None:
         self.forget_dataset = forget_dataset
         self.retain_dataset = retain_dataset
+        self.anchor = anchor
 
     def __len__(self) -> int:
+        if self.anchor == "retain":
+            assert self.retain_dataset is not None
+            return len(self.retain_dataset)  # type: ignore[arg-type]
         return len(self.forget_dataset)  # type: ignore[arg-type]
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        result: dict[str, Any] = {"forget": self.forget_dataset[index]}
-        if self.retain_dataset is not None and len(self.retain_dataset) > 0:  # type: ignore[arg-type]
-            retain_index = index % len(self.retain_dataset)  # type: ignore[arg-type]
-            result["retain"] = self.retain_dataset[retain_index]
+        result: dict[str, Any] = {}
+        if self.anchor == "forget":
+            result["forget"] = self.forget_dataset[index]
+            if self.retain_dataset is not None and len(self.retain_dataset) > 0:  # type: ignore[arg-type]
+                retain_index = torch.randint(0, len(self.retain_dataset), (1,)).item()  # type: ignore[arg-type]
+                result["retain"] = self.retain_dataset[retain_index]
+        else:
+            assert self.retain_dataset is not None
+            result["retain"] = self.retain_dataset[index]
+            if self.forget_dataset is not None and len(self.forget_dataset) > 0:  # type: ignore[arg-type]
+                forget_index = torch.randint(0, len(self.forget_dataset), (1,)).item()  # type: ignore[arg-type]
+                result["forget"] = self.forget_dataset[forget_index]
         return result
 
 

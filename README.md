@@ -21,6 +21,8 @@ For any text (song lyrics, book excerpts, etc.), CleanSlate:
 pip install -e ".[cli,export]"
 ```
 
+See also **`curation/README.md`** — a standalone pipeline for searching CleanSlate `reference_target` texts verbatim in Dolma3 (infini-gram-mini FM-index + BM25). Produces HF datasets of per-match rows used downstream in FSID curation. See [Corpus Retrieval](#corpus-retrieval-curation) below.
+
 ## Quick Start
 
 ### Probe a text for memorization
@@ -499,3 +501,45 @@ cleanslate fsid qa score \
 `qa eval` runs the `cleanslate_qa_fast` lm-eval task (SGLang backend) to generate answers and compute `exact_match` + `contains_match` per sample. When `--judge` is enabled (default), samples that didn't pass `contains_match` are sent to the Gemini LLM judge in parallel (`--max-judge-workers` threads). Per-sample output includes all three metric scores (`exact_match`, `contains_match`, `llm_judge_match`) and the model's prediction.
 
 `qa score` splits QA results by forget/retain content and reports per-subset accuracy deltas. After unlearning, forget-set QA accuracy should ideally stay the same (knowledge retention), while p_z should drop (verbatim memorization removed)
+
+## Corpus Retrieval (`curation/`)
+
+Independent of the evaluation and FSID workflows, `curation/retrieval/` is a standalone pipeline for searching CleanSlate `reference_target` texts verbatim in Dolma3 using multiple methods:
+
+| Method | Backend | Use case |
+|--------|---------|----------|
+| `infini_gram_mini` | FM-index exact n-gram (byte-level) | Verbatim span discovery per OLMoTrace (arxiv 2504.07096) |
+| `bm25` | Sharded `bm25s` | Lexical top-k retrieval |
+
+Produces one HF dataset per method × corpus variant: `{method}_cleanslate_dolma3_{variant}`.
+
+**Published:**
+- `unlearning-cleanslate/infini_gram_mini_cleanslate_dolma3_10B` — 287K hits over 4666 items
+- `unlearning-cleanslate/verif-bm25-dolma-10B` — BM25 top-k retrieval on Dolma3 10B
+- `unlearning-cleanslate/*_cleanslate_dolma3_6T` (pending — needs 40TB+ disk for FM-index)
+
+### Quick Start
+
+```bash
+# 1. Install retrieval deps
+pip install -e ".[cli,export]" polars pybind11 zstandard bm25s
+
+# 2. Vendor + compile infini-gram-mini (curation/vendor/ is gitignored)
+git clone https://github.com/xuhaoxh/infini-gram-mini.git curation/vendor/infini-gram-mini
+# Then compile the C++ engine and cpp_indexing_local — see curation/README.md step 3
+
+# 3. Download Dolma3 (10B = 18GB)
+export DOLMA_ROOT=/path/to/dolma3
+huggingface-cli download allenai/dolma3_dolmino_mix-10B-1025 \
+    --repo-type dataset --local-dir $DOLMA_ROOT/raw/10B
+
+# 4. Run end-to-end: build-index → search → export → push
+python -m curation.retrieval.cli run \
+    --method infini_gram_mini --corpus 10B --workers 128 \
+    --dolma-dir $DOLMA_ROOT \
+    --push-to-hub --hf-repo unlearning-cleanslate/infini_gram_mini_cleanslate_dolma3_10B
+```
+
+Each stage is idempotent and restartable (output file existence = done). Per-item parquets are the restart granularity for search; the FM-index is one-shot per `(corpus, config)` pair.
+
+See **`curation/README.md`** for full setup details (C++ engine compile steps, 6T download options including `allenai/dolma3_mix-6T` category selection, CLI flags, output schema, troubleshooting).

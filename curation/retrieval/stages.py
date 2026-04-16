@@ -2,7 +2,7 @@
 
 import json
 import time
-from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Pool
 from pathlib import Path
 
 import polars as pl
@@ -83,12 +83,12 @@ def search(
     completed = 0
     cfg_json = json.dumps(cfg.worker_payload())
 
-    with ProcessPoolExecutor(
-        max_workers=cfg.workers,
+    with Pool(
+        processes=cfg.workers,
         initializer=_init_search_worker,
         initargs=(cfg_json,),
     ) as pool:
-        for content_id, hits in pool.map(_search_worker, pending.to_dicts()):
+        for content_id, hits in pool.imap_unordered(_search_worker, pending.to_dicts()):
             _write_hits(cfg.items_dir / f"{content_id}.parquet", hits)
             completed += 1
             if completed % 50 == 0 or completed == total:
