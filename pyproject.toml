@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-eval = ["lm-eval==0.4.11", "litellm==1.83.0"]
+eval = ["lm-eval==0.4.11", "litellm==1.83.0", "python-dotenv==1.0.1"]
 dev = ["ruff", "mypy", "pytest"]
 
 [project.scripts]
