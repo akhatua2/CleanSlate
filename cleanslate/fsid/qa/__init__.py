@@ -1,61 +1,29 @@
-"""QA Benchmark Generation for CleanSlate.
+"""QA benchmark generation pipeline for the CleanSlate retain metric.
 
-Generate atomic QA pairs from song lyrics, validate against base models,
-and create a benchmark for evaluating semantic retention after unlearning.
+Stages:
+    extract  — content text → propositions (interior facts)
+    generate — propositions → atomic QA candidates
+    filter   — candidates → validated QAs (skeleton; OOS model probing TBD)
+    push     — validated QAs → HF dataset (qa_benchmark config)
+
+Each stage is a standalone module. Run with `python -m cleanslate.fsid.qa.<stage>`.
 """
 
-from cleanslate.fsid.qa.base import (
-    QAPair,
-    QACandidate,
-    ValidatedQA,
-    ContentQABenchmark,
-    QAEvalResult,
-    QABenchmarkSummary,
-)
-from cleanslate.fsid.qa.generator import generate_qa_candidates, generate_qa_for_content
-from cleanslate.fsid.qa.judge import is_correct
-from cleanslate.fsid.qa.validator import validate_qa_candidates, validate_single_candidate
-from cleanslate.fsid.qa.io import (
-    save_candidates,
-    load_candidates,
-    save_validated,
-    load_validated,
-    export_for_dataset,
-)
-from cleanslate.fsid.qa.scoring import (
-    compute_qa_score,
-    evaluate_qa,
-    load_qa_eval,
-    save_qa_eval,
-    save_qa_score,
-)
+from __future__ import annotations
 
-__all__ = [
-    # Dataclasses
-    "QAPair",
-    "QACandidate",
-    "ValidatedQA",
-    "ContentQABenchmark",
-    "QAEvalResult",
-    "QABenchmarkSummary",
-    # Generation
-    "generate_qa_candidates",
-    "generate_qa_for_content",
-    # Judging
-    "is_correct",
-    # Validation
-    "validate_qa_candidates",
-    "validate_single_candidate",
-    # I/O
-    "save_candidates",
-    "load_candidates",
-    "save_validated",
-    "load_validated",
-    "export_for_dataset",
-    # Scoring
-    "evaluate_qa",
-    "save_qa_eval",
-    "load_qa_eval",
-    "compute_qa_score",
-    "save_qa_score",
-]
+import logging
+import os
+
+import litellm  # type: ignore[import-untyped]
+from dotenv import load_dotenv
+
+from cleanslate.fsid.qa.base import Proposition, QACandidate, ValidatedQA
+
+load_dotenv()
+
+litellm.suppress_debug_info = True
+logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+
+QA_MODEL = os.getenv("QA_MODEL", "openai/gpt-5.4-mini")
+
+__all__ = ["QA_MODEL", "Proposition", "QACandidate", "ValidatedQA"]

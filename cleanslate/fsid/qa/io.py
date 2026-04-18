@@ -1,83 +1,35 @@
-"""I/O utilities for QA benchmark datasets."""
+"""JSON I/O for QA pipeline artifacts."""
+
+from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TypeVar
 
-import polars as pl
+from cleanslate.fsid.qa.base import Proposition, QACandidate, ValidatedQA
 
-from cleanslate.fsid.qa.base import QACandidate, ValidatedQA
+T = TypeVar("T", Proposition, QACandidate, ValidatedQA)
 
 
-def save_candidates(candidates: list[QACandidate], path: str | Path) -> Path:
-    """Save QA candidates to parquet."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save_rows(rows: list[T], path: str | Path) -> Path:
+    """Save a list of dataclass rows to JSON."""
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w") as f:
+        json.dump([r.to_dict() for r in rows], f, indent=2, ensure_ascii=False)
+    return out
 
-    df = pl.DataFrame([c.to_dict() for c in candidates])
-    df.write_parquet(path)
-    return path
+
+def load_propositions(path: str | Path) -> list[Proposition]:
+    with Path(path).open() as f:
+        return [Proposition(**row) for row in json.load(f)]
 
 
 def load_candidates(path: str | Path) -> list[QACandidate]:
-    """Load QA candidates from parquet."""
-    df = pl.read_parquet(path)
-    return [
-        QACandidate(
-            content_id=row["content_id"],
-            content_title=row["content_title"],
-            question=row["question"],
-            answer=row["answer"],
-        )
-        for row in df.to_dicts()
-    ]
-
-
-def save_validated(validated: list[ValidatedQA], path: str | Path) -> Path:
-    """Save validated QA pairs to parquet."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    df = pl.DataFrame([v.to_dict() for v in validated])
-    df.write_parquet(path)
-    return path
+    with Path(path).open() as f:
+        return [QACandidate(**row) for row in json.load(f)]
 
 
 def load_validated(path: str | Path) -> list[ValidatedQA]:
-    """Load validated QA pairs from parquet."""
-    df = pl.read_parquet(path)
-    return [
-        ValidatedQA(
-            content_id=row["content_id"],
-            content_title=row["content_title"],
-            question=row["question"],
-            answer=row["answer"],
-            verified_models=row["verified_models"],
-        )
-        for row in df.to_dicts()
-    ]
-
-
-def export_for_dataset(
-    validated: list[ValidatedQA],
-    path: str | Path,
-) -> Path:
-    """Export validated QA as JSON grouped by content_id (for HF dataset)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Group by content_id
-    by_content: dict[str, list[dict[str, str]]] = {}
-    for v in validated:
-        if v.content_id not in by_content:
-            by_content[v.content_id] = []
-        by_content[v.content_id].append({"question": v.question, "answer": v.answer})
-
-    # Format for HF dataset: list of {content_id, content_qa: [...]}
-    records = [
-        {"content_id": cid, "content_qa": qas} for cid, qas in by_content.items()
-    ]
-
-    with open(path, "w") as f:
-        json.dump(records, f, indent=2)
-
-    return path
+    with Path(path).open() as f:
+        return [ValidatedQA(**row) for row in json.load(f)]
