@@ -7,7 +7,8 @@ MODEL_ALIASES: dict[str, tuple[str, str]] = {
     "llama-8b": ("meta-llama/Llama-3.1-8B", "llama-3_1-8b"),
     "qwen-8b": ("Qwen/Qwen3-8B", "qwen3-8b"),
     "olmo-7b": ("allenai/Olmo-3-1025-7B", "olmo-3-7b"),
-    # "gemma-12b": ("google/gemma-3-12b-pt", "gemma-3-12b"),
+    "nemotron-9b": ("nvidia/NVIDIA-Nemotron-Nano-9B-v2", "nemotron-nano-9b-v2"),
+    "gemma-12b": ("google/gemma-3-12b-pt", "gemma-3-12b"),
     # "marin-8b": ("marin-community/marin-8b-base", "marin-8b"),
     # Qwen version range (~8B)
     # "qwen2-7b": ("Qwen/Qwen2-7B", "qwen2-7b"),

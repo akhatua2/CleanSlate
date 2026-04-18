@@ -24,6 +24,8 @@ def validate_cmd(
     gpu_memory_utilization: float = typer.Option(0.90, "--gpu-mem"),
     tp_size: int = typer.Option(1, "--tp-size", help="Tensor parallel size"),
     max_model_len: int = typer.Option(4096, "--max-model-len"),
+    base_url: str | None = typer.Option(None, "--base-url", help="Remote vLLM OpenAI endpoint (e.g. https://xxx.modal.run)"),
+    num_concurrent: int = typer.Option(32, "--num-concurrent", help="In-flight requests vs remote endpoint"),
     output: str | None = typer.Option(None, "-o", "--output", help="Path to save JSON results"),
     compare: str | None = typer.Option(None, "--compare", help="Path to previous validation JSON for comparison"),
 ) -> None:
@@ -35,6 +37,8 @@ def validate_cmd(
 
     console.print(f"[bold]Model:[/bold] {model_path}")
     console.print(f"[bold]Tasks:[/bold] {', '.join(task_list)}")
+    if base_url:
+        console.print(f"[bold]Remote endpoint:[/bold] {base_url}")
     if limit:
         console.print(f"[bold]Limit:[/bold] {limit} items per task")
     console.print()
@@ -48,6 +52,8 @@ def validate_cmd(
         gpu_memory_utilization=gpu_memory_utilization,
         tp_size=tp_size,
         max_model_len=max_model_len,
+        base_url=base_url,
+        num_concurrent=num_concurrent,
     )
 
     # Display results table
