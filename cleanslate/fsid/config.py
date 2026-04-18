@@ -1,16 +1,16 @@
 """Configuration types for local FSID unlearning runs."""
 
-from dataclasses import dataclass, fields as dataclass_fields
+from dataclasses import dataclass, field, fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
 
-ObjectiveType = Literal["ga", "grad_diff", "npo", "simnpo"]
+ObjectiveType = Literal["ga", "grad_diff", "npo", "simnpo", "rmu", "undial"]
 TrainModeType = Literal["full", "lora"]
 DistributedStrategyType = Literal["single", "fsdp"]
 FSDPShardingStrategyType = Literal["full_shard", "shard_grad_op"]
-RetainLossType = Literal["nll", "kl"]
+RetainLossType = Literal["nll", "kl", "embed_diff"]
 
 ALLOWED_TRAIN_MODES: tuple[str, ...] = ("full", "lora")
 ALLOWED_DTYPES: tuple[str, ...] = ("bfloat16", "float16", "float32")
@@ -19,7 +19,7 @@ ALLOWED_FSDP_SHARDING_STRATEGIES: tuple[str, ...] = (
     "full_shard",
     "shard_grad_op",
 )
-ALLOWED_RETAIN_LOSS_TYPES: tuple[str, ...] = ("nll", "kl")
+ALLOWED_RETAIN_LOSS_TYPES: tuple[str, ...] = ("nll", "kl", "embed_diff")
 
 
 def get_allowed_objectives() -> list[str]:
@@ -63,7 +63,18 @@ class TrainerConfig:
     retain_loss_type: RetainLossType = "nll"
 
     npo_beta: float = 0.1
-    simnpo_gamma: float = 0.1
+    simnpo_delta: float = 0.0
+
+    # RMU-specific
+    rmu_steering_coeff: float = 2.0
+    rmu_module_regex: str = r"model\.layers\.7"
+    rmu_trainable_params_regex: list[str] = field(default_factory=lambda: [".*"])
+    # Separate generator seed for the random control vector so runs are
+    # reproducible and independent of upstream RNG consumption order.
+    rmu_control_vec_seed: int = 0
+
+    # UNDIAL-specific
+    undial_beta: float = 10.0
 
     validation_path: str | None = None
     validation_text_col: str = "lyrics"
@@ -185,6 +196,13 @@ class TrainerConfig:
                 raise ValueError("grad_diff requires retain_path")
             if self.retain_weight <= 0:
                 raise ValueError("grad_diff requires retain_weight > 0")
+        if self.objective == "rmu":
+            if not self.retain_path:
+                raise ValueError("rmu requires retain_path")
+            if self.retain_weight <= 0:
+                raise ValueError("rmu requires retain_weight > 0")
+            if self.retain_loss_type != "embed_diff":
+                raise ValueError("rmu requires retain_loss_type='embed_diff'")
         if self.train_mode == "lora" and self.save_every > 0:
             raise ValueError(
                 "save_every > 0 is not supported for LoRA runs because checkpoints "

@@ -140,6 +140,7 @@ def segment_shard(raw_path: Path, out_path: Path, cfg: Cfg) -> int:
 
 
 def _build_one_shard_index(args: tuple[str, str]) -> dict[str, int | bool]:
+    import gc
     parquet_path, index_dir = args
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
     import bm25s
@@ -155,31 +156,41 @@ def _build_one_shard_index(args: tuple[str, str]) -> dict[str, int | bool]:
         columns=["unit_id", "doc_id", "source", "category", "char_start", "char_end", "text"],
     )
     texts = table.column("text").to_pylist()
+    unit_ids = table.column("unit_id").to_pylist()
+    doc_ids = table.column("doc_id").to_pylist()
+    sources = table.column("source").to_pylist()
+    categories = table.column("category").to_pylist()
+    char_starts = table.column("char_start").to_pylist()
+    char_ends = table.column("char_end").to_pylist()
+    n_rows = len(texts)
+    del table
+    gc.collect()
+
+    # Tokenize first — bm25s.tokenize's output replaces the need for texts in memory
+    # during indexing, but bm25s.save() needs corpus. Build corpus AFTER tokenize to
+    # avoid holding 2x copies of text simultaneously during the memory-heavy index step.
+    tokens = tokenize_texts(texts)
+    retriever = bm25s.BM25()
+    retriever.index(tokens, show_progress=False)
+    del tokens
+    gc.collect()
+
     corpus = [
         {
-            "unit_id": unit_id,
-            "doc_id": doc_id,
-            "doc_source": source,
-            "doc_category": category,
-            "unit_char_start": char_start,
-            "unit_char_end": char_end,
-            "retrieved_text": text,
+            "unit_id": unit_ids[i],
+            "doc_id": doc_ids[i],
+            "doc_source": sources[i],
+            "doc_category": categories[i],
+            "unit_char_start": char_starts[i],
+            "unit_char_end": char_ends[i],
+            "retrieved_text": texts[i],
         }
-        for unit_id, doc_id, source, category, char_start, char_end, text in zip(
-            table.column("unit_id").to_pylist(),
-            table.column("doc_id").to_pylist(),
-            table.column("source").to_pylist(),
-            table.column("category").to_pylist(),
-            table.column("char_start").to_pylist(),
-            table.column("char_end").to_pylist(),
-            texts,
-            strict=True,
-        )
+        for i in range(n_rows)
     ]
-    retriever = bm25s.BM25()
-    retriever.index(tokenize_texts(texts), show_progress=False)
     retriever.save(str(out), corpus=corpus)
-    return {"skipped": False, "rows": len(texts)}
+    del retriever, corpus, texts, unit_ids, doc_ids, sources, categories, char_starts, char_ends
+    gc.collect()
+    return {"skipped": False, "rows": n_rows}
 
 
 def build_bm25_index(cfg: Cfg) -> None:
@@ -192,22 +203,29 @@ def build_bm25_index(cfg: Cfg) -> None:
     seg_dir.mkdir(parents=True, exist_ok=True)
     idx_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Segmenting {len(raw_paths)} raw shards...")
-    seg_tasks = [
-        (raw_path, seg_dir / f"seg_{idx:05d}.parquet", cfg)
-        for idx, raw_path in enumerate(raw_paths)
-        if not (seg_dir / f"seg_{idx:05d}.parquet").exists()
-    ]
-    if seg_tasks:
-        with ProcessPoolExecutor(max_workers=cfg.normalized_index_workers) as pool:
-            futures = [pool.submit(segment_shard, raw_path, out_path, shard_cfg) for raw_path, out_path, shard_cfg in seg_tasks]
-            for future in as_completed(futures):
-                future.result()
+    shard_paths = [seg_dir / f"shard_{idx:03d}.parquet" for idx in range(cfg.normalized_num_shards)]
+    compaction_done = all(
+        path.exists() or (idx_dir / f"shard_{i:03d}" / "data.csc.index.npy").exists()
+        for i, path in enumerate(shard_paths)
+    )
+
+    if not compaction_done:
+        print(f"Segmenting {len(raw_paths)} raw shards...")
+        seg_tasks = [
+            (raw_path, seg_dir / f"seg_{idx:05d}.parquet", cfg)
+            for idx, raw_path in enumerate(raw_paths)
+            if not (seg_dir / f"seg_{idx:05d}.parquet").exists()
+        ]
+        if seg_tasks:
+            with ProcessPoolExecutor(max_workers=cfg.normalized_index_workers) as pool:
+                futures = [pool.submit(segment_shard, raw_path, out_path, shard_cfg) for raw_path, out_path, shard_cfg in seg_tasks]
+                for future in as_completed(futures):
+                    future.result()
+    else:
+        print("Segmentation + compaction already complete, skipping.")
 
     print(f"Segmentation done. Compacting into {cfg.normalized_num_shards} shards...")
-    shard_paths = [seg_dir / f"shard_{idx:03d}.parquet" for idx in range(cfg.normalized_num_shards)]
-    need_compact = not all(path.exists() or (idx_dir / f"shard_{i:03d}" / "data.csc.index.npy").exists()
-                           for i, path in enumerate(shard_paths))
+    need_compact = not compaction_done
     compacted_from: dict[int, list[Path]] = {}
     if need_compact:
         writers: dict[int, pq.ParquetWriter] = {}
@@ -237,7 +255,10 @@ def build_bm25_index(cfg: Cfg) -> None:
         for shard_idx, shard_path in enumerate(shard_paths)
         if shard_path.exists()
     ]
-    with ProcessPoolExecutor(max_workers=cfg.normalized_index_workers) as pool:
+    with ProcessPoolExecutor(
+        max_workers=cfg.normalized_index_workers,
+        max_tasks_per_child=1,
+    ) as pool:
         futures = {pool.submit(_build_one_shard_index, task): task for task in tasks}
         for future in as_completed(futures):
             future.result()

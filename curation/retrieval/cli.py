@@ -23,6 +23,7 @@ def _add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--index-mem-gb", type=int, default=256)
     parser.add_argument("--num-shards", type=int, default=None)
     parser.add_argument("--num-index-shards", type=int, default=1, help="Split FM-index into N shards to reduce peak disk usage during build")
+    parser.add_argument("--fm-parallel", type=int, default=1, help="Build this many FM-index shards concurrently (infini_gram_mini)")
     parser.add_argument("--dolma-dir", default=None)
     parser.add_argument("--curation-root", default=None)
     parser.add_argument("--dataset-path", default=None)
@@ -46,6 +47,7 @@ def _cfg(args: argparse.Namespace) -> Cfg:
         index_mem_gb=args.index_mem_gb,
         num_shards=args.num_shards,
         num_index_shards=args.num_index_shards,
+        fm_parallel=args.fm_parallel,
         dolma_root=args.dolma_dir,
         curation_root=args.curation_root,
         dataset_path=args.dataset_path,

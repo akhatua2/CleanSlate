@@ -105,10 +105,21 @@ def _build_one_fm_shard(cfg: Cfg, raw_paths: list[Path], shard_dir: Path) -> Non
     shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def _build_shard_worker(args: tuple[str, list[str], str, int]) -> int:
+    """Subprocess entrypoint: rebuild Cfg from JSON, build one shard."""
+    import json as _json
+    from curation.retrieval.schema import Cfg as _Cfg
+    cfg_json, raw_strs, shard_dir_str, shard_idx = args
+    cfg = _Cfg(**_json.loads(cfg_json))
+    _build_one_fm_shard(cfg, [Path(p) for p in raw_strs], Path(shard_dir_str))
+    return shard_idx
+
+
 def build_fm_index(cfg: Cfg) -> None:
     """Build FM-index from raw Dolma shards. Sharded: splits corpus into
-    cfg.num_index_shards independent FM-indexes built sequentially, deleting
-    intermediates between shards. Idempotent per-shard."""
+    cfg.num_index_shards independent FM-indexes, optionally built in parallel
+    (cfg.fm_parallel). Intermediates are deleted per-shard as they complete.
+    Idempotent per-shard."""
     idx = cfg.index_dir
     n = max(1, cfg.num_index_shards)
 
@@ -125,7 +136,8 @@ def build_fm_index(cfg: Cfg) -> None:
         raise FileNotFoundError(f"No .jsonl.zst in {cfg.raw_data}")
 
     idx.mkdir(parents=True, exist_ok=True)
-    print(f"Building FM-index: {len(all_shards)} raw shards → {idx} ({n} index shards)")
+    parallel = max(1, min(cfg.fm_parallel, n))
+    print(f"Building FM-index: {len(all_shards)} raw shards → {idx} ({n} index shards, {parallel}-way parallel)")
 
     if n == 1:
         _build_one_fm_shard(cfg, all_shards, idx)
@@ -134,13 +146,34 @@ def build_fm_index(cfg: Cfg) -> None:
 
     # Round-robin raw shards into N groups so each group has similar size
     groups = [all_shards[i::n] for i in range(n)]
+    pending: list[tuple[int, list[Path], Path]] = []
     for shard_idx, group in enumerate(groups):
         shard_dir = idx / f"shard_{shard_idx:03d}"
         if (shard_dir / "data.fm9").exists():
             print(f"  shard {shard_idx}/{n} already built, skipping")
             continue
-        print(f"  shard {shard_idx}/{n}: {len(group)} raw shards → {shard_dir}")
-        _build_one_fm_shard(cfg, group, shard_dir)
+        pending.append((shard_idx, group, shard_dir))
+
+    if not pending:
+        print(f"FM-index complete: {n} shards at {idx}")
+        return
+
+    if parallel == 1:
+        for shard_idx, group, shard_dir in pending:
+            print(f"  shard {shard_idx}/{n}: {len(group)} raw shards → {shard_dir}")
+            _build_one_fm_shard(cfg, group, shard_dir)
+    else:
+        import json as _json
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        cfg_json = _json.dumps({k: v for k, v in cfg.__dict__.items() if not k.startswith("_")}, default=str)
+        tasks = [(cfg_json, [str(p) for p in group], str(shard_dir), shard_idx)
+                 for shard_idx, group, shard_dir in pending]
+        print(f"  dispatching {len(tasks)} shards across {parallel} workers")
+        with ProcessPoolExecutor(max_workers=parallel) as pool:
+            futures = {pool.submit(_build_shard_worker, t): t[3] for t in tasks}
+            for fut in as_completed(futures):
+                done_idx = fut.result()
+                print(f"  shard {done_idx}/{n} done")
 
     print(f"FM-index complete: {n} shards at {idx}")
 

@@ -367,10 +367,10 @@ def train(
         "--npo-beta",
         help="NPO beta parameter",
     ),
-    simnpo_gamma: float | None = typer.Option(
+    simnpo_delta: float | None = typer.Option(
         None,
-        "--simnpo-gamma",
-        help="SimNPO margin parameter",
+        "--simnpo-delta",
+        help="SimNPO margin (delta); matches open-unlearning's delta inside sigmoid(beta*(avg_nll - delta))",
     ),
     forget_weight: float | None = typer.Option(
         None,
@@ -540,7 +540,7 @@ def train(
         "warmup_steps": warmup_steps,
         "max_grad_norm": max_grad_norm,
         "npo_beta": npo_beta,
-        "simnpo_gamma": simnpo_gamma,
+        "simnpo_delta": simnpo_delta,
         "forget_weight": forget_weight,
         "retain_weight": retain_weight,
         "retain_loss_type": retain_loss_type,

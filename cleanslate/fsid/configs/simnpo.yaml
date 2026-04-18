@@ -3,7 +3,7 @@ forget_path: null
 objective: simnpo
 train_mode: full
 npo_beta: 2.0            # lower β = broader sigmoid = stronger unlearning gradient
-simnpo_gamma: 0.5         # positive margin pushes log-probs further down
+simnpo_delta: 0.25        # delta = old_gamma / beta = 0.5 / 2.0 (OU parameterization)
 retain_path: null
 forget_weight: 5.0        # 40x higher than default (0.125) — dominate the loss
 retain_weight: 1.0

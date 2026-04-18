@@ -98,18 +98,26 @@ class OpenUnlearningCollator:
 
 
 class RandomRetainDataset(TorchDataset):
-    """Forget+retain dataset with random retain sampling (matching open-unlearning).
+    """Forget+retain dataset with random retain sampling.
 
-    open-unlearning uses torch.randint for retain index instead of deterministic modulo.
+    open-unlearning's ForgetRetainDataset uses `torch.randint(...)` on the global
+    generator, so retain pairings are unreproducible across runs / workers / ranks.
+    We expose an explicit `retain_seed` that makes `(forget_idx → retain_idx)`
+    fully deterministic: per-index RNG seeded from `retain_seed * LARGE + idx`.
+    Set `retain_seed=None` to fall back to the global generator (OU-compatible).
     """
+
+    _SEED_OFFSET: int = 1_000_003  # a prime to decouple adjacent index streams
 
     def __init__(
         self,
         forget_dataset: TorchDataset,
         retain_dataset: TorchDataset | None = None,
+        retain_seed: int | None = None,
     ) -> None:
         self.forget_dataset = forget_dataset
         self.retain_dataset = retain_dataset
+        self.retain_seed = retain_seed
 
     def __len__(self) -> int:
         return len(self.forget_dataset)  # type: ignore[arg-type]
@@ -117,8 +125,14 @@ class RandomRetainDataset(TorchDataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
         result: dict[str, Any] = {"forget": self.forget_dataset[index]}
         if self.retain_dataset is not None and len(self.retain_dataset) > 0:  # type: ignore[arg-type]
-            retain_index = torch.randint(0, len(self.retain_dataset), (1,)).item()  # type: ignore[arg-type]
-            result["retain"] = self.retain_dataset[retain_index]
+            n_retain = len(self.retain_dataset)  # type: ignore[arg-type]
+            if self.retain_seed is None:
+                retain_index = torch.randint(0, n_retain, (1,)).item()
+            else:
+                g = torch.Generator()
+                g.manual_seed(int(self.retain_seed) * self._SEED_OFFSET + int(index))
+                retain_index = torch.randint(0, n_retain, (1,), generator=g).item()
+            result["retain"] = self.retain_dataset[retain_index]  # type: ignore[index]
         return result
 
 
@@ -147,7 +161,7 @@ def preprocess_chat_instance(
 
     # Full conversation token IDs
     chat_ids: list[int] = tokenizer.apply_chat_template(
-        chat, tokenize=True, add_generation_prompt=False
+        chat, tokenize=True, add_generation_prompt=False, return_dict=False,
     )
 
     # Prompt-only IDs (everything up to the assistant turn)
@@ -156,7 +170,7 @@ def preprocess_chat_instance(
         {"role": "user", "content": question},
     ]
     prompt_ids: list[int] = tokenizer.apply_chat_template(
-        prompt_chat, tokenize=True, add_generation_prompt=True
+        prompt_chat, tokenize=True, add_generation_prompt=True, return_dict=False,
     )
 
     # Ensure EOS at end
@@ -224,7 +238,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--objective",
         type=str,
-        choices=["npo", "simnpo"],
+        choices=["ga", "npo", "simnpo", "rmu", "undial"],
         required=True,
     )
     parser.add_argument(
@@ -284,6 +298,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable gradient checkpointing to save memory",
     )
+    parser.add_argument(
+        "--retain-seed",
+        type=int,
+        default=None,
+        help="Seed for deterministic retain-pair sampling (reproducible across runs). "
+             "Omit to use OU-style global-generator sampling (nondeterministic).",
+    )
+    parser.add_argument(
+        "--rmu-control-vec-path",
+        type=str,
+        default=None,
+        help="Path to a .pt file containing a saved control vector. If set, this tensor "
+             "is used verbatim; `--seed` and rank-based offset are ignored. Useful for "
+             "reproducing a specific OU run (save OU's self.control_vec to disk first).",
+    )
     return parser.parse_args()
 
 
@@ -297,23 +326,53 @@ def main() -> None:
     logger.info("Output: %s", args.output_dir)
 
     # --- Hyperparameters matched to open-unlearning ---
-    if args.objective == "npo":
+    # RMU-specific fields (unused for ga/npo/simnpo/undial)
+    rmu_steering_coeff = 0.0
+    rmu_module_regex = ""
+    retain_loss_type = "nll"
+    undial_beta = 10.0
+
+    if args.objective == "ga":
+        # Pure gradient ascent: loss = -outputs.loss on forget only.
+        # retain_weight=0 gates off the retain forward pass in CleanSlateUnlearnTrainer.
+        npo_beta = 0.0
+        simnpo_delta = 0.0
+        forget_weight = 1.0
+        retain_weight = 0.0
+    elif args.objective == "npo":
         npo_beta = 0.1
-        simnpo_gamma = 0.0
+        simnpo_delta = 0.0
         forget_weight = 1.0  # gamma in open-unlearning
         retain_weight = 1.0  # alpha in open-unlearning
     elif args.objective == "simnpo":
         npo_beta = 4.5
-        simnpo_gamma = 0.0  # gamma = beta * delta, delta=0.0
+        simnpo_delta = 0.0  # matches OU's delta=0.0 for TOFU
         forget_weight = 0.125  # gamma in open-unlearning
         retain_weight = 1.0  # alpha in open-unlearning
+    elif args.objective == "rmu":
+        npo_beta = 0.0
+        simnpo_delta = 0.0
+        forget_weight = 1.0  # OU gamma
+        retain_weight = 1.0  # OU alpha
+        rmu_steering_coeff = 2.0
+        rmu_module_regex = r"model\.layers\.7"
+        retain_loss_type = "embed_diff"
+    elif args.objective == "undial":
+        # UNDIAL paper / OU yaml defaults for TOFU: lr=1e-4, beta=10, gamma=1, alpha=0.
+        # alpha=0 means no retain loss (paper does not use retain set); we still
+        # pass retain batches through but they're gated off by retain_weight=0.
+        npo_beta = 0.0
+        simnpo_delta = 0.0
+        forget_weight = 1.0       # OU gamma
+        retain_weight = 0.0       # OU alpha
+        undial_beta = 10.0
     else:
         raise ValueError(f"Unknown objective: {args.objective}")
 
     logger.info(
         "Hyperparams: beta=%.2f, gamma=%.2f, forget_weight=%.4f, retain_weight=%.1f",
         npo_beta,
-        simnpo_gamma,
+        simnpo_delta,
         forget_weight,
         retain_weight,
     )
@@ -341,7 +400,13 @@ def main() -> None:
     retain_dataset = TOFUQADataset(
         retain_hf, tokenizer, max_length=args.max_length
     )
-    train_dataset = RandomRetainDataset(forget_dataset, retain_dataset)
+    train_dataset = RandomRetainDataset(
+        forget_dataset, retain_dataset, retain_seed=args.retain_seed
+    )
+    if args.retain_seed is not None:
+        logger.info("Retain sampling: deterministic (retain_seed=%d)", args.retain_seed)
+    else:
+        logger.info("Retain sampling: OU-style global-generator (nondeterministic)")
 
     # --- Load model ---
     logger.info("Loading model: %s", args.model)
@@ -350,6 +415,7 @@ def main() -> None:
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
+        attn_implementation="flash_attention_2",
     )
     model.config.use_cache = False
 
@@ -364,7 +430,7 @@ def main() -> None:
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accum_steps,
         learning_rate=args.lr,
-        optim="adamw_torch",  # open-unlearning uses paged_adamw_32bit but requires bitsandbytes
+        optim="paged_adamw_32bit",
         weight_decay=0.01,  # open-unlearning unlearn/tofu/default.yaml
         warmup_steps=warmup_steps,
         num_train_epochs=args.num_epochs,
@@ -387,28 +453,37 @@ def main() -> None:
     collator = OpenUnlearningCollator(pad_token_id=pad_id)
 
     # --- Trainer ---
-    trainer = CleanSlateUnlearnTrainer(
+    trainer_kwargs: dict[str, Any] = dict(
         objective=args.objective,
         npo_beta=npo_beta,
-        simnpo_gamma=simnpo_gamma,
+        simnpo_delta=simnpo_delta,
         forget_weight=forget_weight,
         retain_weight=retain_weight,
-        retain_loss_type="nll",
+        retain_loss_type=retain_loss_type,
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         data_collator=collator,
         processing_class=tokenizer,
     )
+    if args.objective == "rmu":
+        trainer_kwargs["rmu_steering_coeff"] = rmu_steering_coeff
+        trainer_kwargs["rmu_module_regex"] = rmu_module_regex
+        trainer_kwargs["rmu_control_vec_seed"] = args.seed
+        trainer_kwargs["rmu_control_vec_path"] = args.rmu_control_vec_path
+    if args.objective == "undial":
+        trainer_kwargs["undial_beta"] = undial_beta
+    trainer = CleanSlateUnlearnTrainer(**trainer_kwargs)
 
-    # --- Reference model for NPO ---
-    if args.objective == "npo":
-        logger.info("Creating frozen reference model for NPO")
+    # --- Reference model for NPO / RMU / UNDIAL ---
+    if args.objective in ("npo", "rmu", "undial"):
+        logger.info("Creating frozen reference model for %s", args.objective.upper())
         ref_model = AutoModelForCausalLM.from_pretrained(
             args.model,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             trust_remote_code=True,
+            attn_implementation="flash_attention_2",
         )
         ref_model.config.use_cache = False
         for param in ref_model.parameters():

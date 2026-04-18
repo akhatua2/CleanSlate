@@ -3,7 +3,7 @@ forget_path: null
 objective: simnpo
 train_mode: full
 npo_beta: 2.0
-simnpo_gamma: 0.0
+simnpo_delta: 0.0
 retain_path: null
 forget_weight: 0.125
 retain_weight: 1.0

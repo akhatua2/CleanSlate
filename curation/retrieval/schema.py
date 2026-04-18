@@ -29,6 +29,7 @@ class Cfg:
     index_mem_gb: int = 256
     num_shards: int | None = None
     num_index_shards: int = 1
+    fm_parallel: int = 1  # build this many FM-index shards concurrently (infini_gram_mini only)
     dolma_root: str | None = None
     curation_root: str | None = None
     dataset_path: str | None = None
