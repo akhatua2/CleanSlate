@@ -28,7 +28,7 @@ train_image = (
     .entrypoint([])
     .apt_install("git")
     .run_commands(f"git clone -b {BRANCH} {REPO} /app")
-    .uv_pip_install("/app[unlearning]", "hf-transfer==0.1.9", extra_options="-e")
+    .uv_pip_install("/app[unlearning,eval]", "hf-transfer==0.1.9", extra_options="-e")
     .env({
         "HF_HOME": "/model_cache",
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
