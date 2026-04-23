@@ -281,24 +281,35 @@ def search_bm25_one_item(content_id: str, title: str, text: str, cfg: Cfg) -> li
     if not shard_dirs:
         raise FileNotFoundError(f"No BM25 shards at {idx_dir}")
 
-    tokens = tokenize_texts([text])
+    # For items longer than WINDOW_TRIGGER, split the query into overlapping windows.
+    # bm25s batches the windows in a single retrieve() call per shard.
+    WINDOW_TRIGGER = 1_125_000
+    WINDOW_CHARS = 200_000
+    WINDOW_OVERLAP = 5_000
+    if len(text) > WINDOW_TRIGGER:
+        step = WINDOW_CHARS - WINDOW_OVERLAP
+        queries = [text[i : i + WINDOW_CHARS] for i in range(0, len(text), step)]
+    else:
+        queries = [text]
+    tokens = tokenize_texts(queries)
     heap: list[tuple[float, int, dict]] = []
     seq = 0
 
     for shard_dir in shard_dirs:
         retriever = bm25s.BM25.load(str(shard_dir), mmap=True, load_corpus=True)
         docs, scores = retriever.retrieve(tokens, k=cfg.top_k, show_progress=False, n_threads=0)
-        for idx in range(docs.shape[1]):
-            doc = docs[0, idx]
-            if doc is None:
-                continue
-            score = float(scores[0, idx])
-            seq += 1
-            entry = (score, seq, dict(doc))
-            if len(heap) < cfg.top_k:
-                heapq.heappush(heap, entry)
-            elif score > heap[0][0]:
-                heapq.heapreplace(heap, entry)
+        for q_idx in range(docs.shape[0]):
+            for idx in range(docs.shape[1]):
+                doc = docs[q_idx, idx]
+                if doc is None:
+                    continue
+                score = float(scores[q_idx, idx])
+                seq += 1
+                entry = (score, seq, dict(doc))
+                if len(heap) < cfg.top_k:
+                    heapq.heappush(heap, entry)
+                elif score > heap[0][0]:
+                    heapq.heapreplace(heap, entry)
 
     hits: list[dict] = []
     for rank, (score, _, doc) in enumerate(sorted(heap, key=lambda item: item[0], reverse=True), 1):
