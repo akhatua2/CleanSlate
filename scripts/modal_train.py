@@ -124,7 +124,7 @@ def _train_impl(
             "--num_processes", str(n_gpus),
             "--multi_gpu",
             "--mixed_precision", "bf16",
-            "-m", "cleanslate.cli", *cli_args,
+            "-m", "cleanslate", *cli_args,
         ]
     else:
         cmd = ["cleanslate", *cli_args]
