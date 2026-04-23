@@ -15,6 +15,7 @@ dependencies = [
     "tqdm==4.67.3",
     "matplotlib>=3.10.8",
     "bitsandbytes>=0.49.2",
+    "ipykernel>=7.2.0",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +27,12 @@ eval = [
     "modal==1.4.2",
 ]
 dev = ["ruff", "mypy", "pytest"]
-curation = ["polars", "zstandard", "bm25s", "numpy"]
+curation = [
+    "polars",
+    "zstandard",
+    "bm25s",
+    "numpy",
+]
 unlearning = ["accelerate>=0.34"]
 
 [project.scripts]
