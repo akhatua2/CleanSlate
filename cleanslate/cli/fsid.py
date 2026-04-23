@@ -124,8 +124,19 @@ def curate(
     retain_split: str = typer.Option("validation", "--retain-split"),
     retain_samples: int | None = typer.Option(None, "--retain-samples"),
     max_hits_per_song: int = typer.Option(
-        32, "--max-hits-per-song",
+        128, "--max-hits-per-song",
         help="Cap on forget windows per content_id for retrieval rules (bm25, igm).",
+    ),
+    max_windows_per_hit: int = typer.Option(
+        4, "--max-windows-per-hit",
+        help="Per-doc cap: windows taken (evenly-spaced) from each retrieved hit's span "
+             "(bm25 rules). Spreads the per-song cap across many docs.",
+    ),
+    cross_hit_dedup: bool = typer.Option(
+        True, "--cross-hit-dedup/--no-cross-hit-dedup",
+        help="Drop (prefix, suffix) duplicates across different hits in the same song "
+             "(bm25 rules). Turn off when a corpus retrieves the same lyric text "
+             "from many different docs and you want repetition in the forget set.",
     ),
 ) -> None:
     """Turn a forget-song pool into (forget_set.parquet, retain_set.parquet, metadata.json)."""
@@ -146,6 +157,8 @@ def curate(
         retain_split=retain_split,
         retain_samples=retain_samples,
         max_hits_per_song=max_hits_per_song,
+        max_windows_per_hit=max_windows_per_hit,
+        cross_hit_dedup=cross_hit_dedup,
     )
 
     out_dir = output_dir or str(Path("data/fsid/curated") / rule.name)

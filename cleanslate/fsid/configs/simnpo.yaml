@@ -15,7 +15,8 @@ weight_decay: 0.0
 warmup_steps: 10
 max_grad_norm: 1.0
 output_dir: runs
-save_every: 100
+save_every: 200
+save_total_limit: 20    # keep all intermediate ckpts for memorization-vs-step curve
 log_every: 10
 dtype: bfloat16
 optim: paged_adamw_8bit  # ~4x smaller optimizer state (~16 GB vs 64 GB fp32 for 8B)

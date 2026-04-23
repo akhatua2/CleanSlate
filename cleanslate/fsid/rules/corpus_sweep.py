@@ -90,7 +90,7 @@ def curate_corpus_sweep_sets(
                     "window_idx": window["window_idx"],
                     "prefix": window["prefix"],
                     "suffix": window["suffix"],
-                    "sweep_dataset": sweep_id,
+                    "memorized_fraction": row.get("memorized_fraction"),
                     "rule_name": ARTIFACT_RULE_NAME,
                 }
             )

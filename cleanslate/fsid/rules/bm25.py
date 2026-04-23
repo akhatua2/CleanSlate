@@ -15,6 +15,7 @@ from typing import Any
 
 from datasets import load_dataset  # type: ignore[import-untyped]
 
+from cleanslate.fsid.rules._alloc import allocate_per_doc_quota
 from cleanslate.fsid.rules._retain import load_wikitext_retain_rows
 from cleanslate.fsid.rules.baseline import DEFAULT_STRIDE, DEFAULT_WINDOW_SIZE, _slide_windows
 
@@ -23,7 +24,8 @@ logger = logging.getLogger(__name__)
 RULE_NAME = "bm25"
 ARTIFACT_RULE_NAME = "bm25_dolma"
 DEFAULT_BM25_DATASET = "unlearning-cleanslate/verif-bm25-dolma-10B"
-DEFAULT_MAX_HITS_PER_SONG = 32
+DEFAULT_MAX_HITS_PER_SONG = 128
+DEFAULT_MAX_WINDOWS_PER_HIT = 4
 
 
 def _index_bm25_hits(
@@ -60,6 +62,8 @@ def curate_bm25_sets(
     stride: int = DEFAULT_STRIDE,
     base_dataset: str | None = None,
     max_hits_per_song: int = DEFAULT_MAX_HITS_PER_SONG,
+    max_windows_per_hit: int = DEFAULT_MAX_WINDOWS_PER_HIT,
+    cross_hit_dedup: bool = True,
     seed: int = 42,
     retain_dataset: str = "wikitext",
     retain_config: str = "wikitext-103-raw-v1",
@@ -72,6 +76,8 @@ def curate_bm25_sets(
         raise ValueError("unlearn_song_records is empty")
     if max_hits_per_song < 1:
         raise ValueError("max_hits_per_song must be >= 1")
+    if max_windows_per_hit < 1:
+        raise ValueError("max_windows_per_hit must be >= 1")
 
     pool_ids = {str(r["content_id"]) for r in unlearn_song_records}
     id_to_meta = {str(r["content_id"]): r for r in unlearn_song_records}
@@ -86,44 +92,65 @@ def curate_bm25_sets(
 
     forget_rows: list[dict[str, Any]] = []
     skipped_empty_span: list[str] = []
+    docs_used_per_song: list[int] = []
     for index, cid in enumerate(ordered_ids):
         pool_row = id_to_meta[cid]
         request_id = f"req_{index:04d}_{cid[:8]}"
-        seen: set[tuple[str, str]] = set()
-        emitted = 0
+        song_seen: set[tuple[str, str]] = set()
+
+        hit_windows: list[list[tuple[int, str, str]]] = []
         for hit in hits_by_content[cid]:
-            if emitted >= max_hits_per_song:
-                break
             doc = hit["retrieved_text"]
             start = max(0, hit["unit_char_start"])
             end = min(len(doc), hit["unit_char_end"])
             if end <= start:
                 continue
-            span = doc[start:end]
-            for window_idx, prefix, suffix in _slide_windows(
-                span, window_size=window_size, stride=stride,
-            ):
-                if emitted >= max_hits_per_song:
-                    break
-                key = (prefix, suffix)
-                if key in seen:
-                    continue
-                seen.add(key)
-                forget_rows.append(
-                    {
-                        "request_id": request_id,
-                        "content_id": cid,
-                        "content_title": pool_row.get("content_title", ""),
-                        "window_idx": window_idx,
-                        "prefix": prefix,
-                        "suffix": suffix,
-                        "memorized_fraction": pool_row.get("memorized_fraction"),
-                        "rule_name": ARTIFACT_RULE_NAME,
-                    }
-                )
-                emitted += 1
-        if emitted == 0:
+            ws = _slide_windows(doc[start:end], window_size=window_size, stride=stride)
+            if ws:
+                hit_windows.append(ws)
+        if not hit_windows:
             skipped_empty_span.append(cid)
+            continue
+
+        def _emit(window_idx: int, prefix: str, suffix: str) -> bool:
+            key = (prefix, suffix)
+            if cross_hit_dedup and key in song_seen:
+                return False
+            song_seen.add(key)
+            forget_rows.append(
+                {
+                    "request_id": request_id,
+                    "content_id": cid,
+                    "content_title": pool_row.get("content_title", ""),
+                    "window_idx": window_idx,
+                    "prefix": prefix,
+                    "suffix": suffix,
+                    "memorized_fraction": pool_row.get("memorized_fraction"),
+                    "rule_name": ARTIFACT_RULE_NAME,
+                }
+            )
+            return True
+
+        available = [len(ws) for ws in hit_windows]
+        quotas = allocate_per_doc_quota(
+            available, cap=max_hits_per_song, per_doc_floor=max_windows_per_hit,
+        )
+        docs_contributing = 0
+        for ws, quota in zip(hit_windows, quotas, strict=True):
+            if quota <= 0:
+                continue
+            if quota >= len(ws):
+                take = ws
+            else:
+                step = len(ws) / quota
+                take = [ws[int(j * step)] for j in range(quota)]
+            emitted_from_doc = 0
+            for w in take:
+                if _emit(*w):
+                    emitted_from_doc += 1
+            if emitted_from_doc > 0:
+                docs_contributing += 1
+        docs_used_per_song.append(docs_contributing)
 
     songs_without_hits = len(pool_ids) - len(hits_by_content)
     if songs_without_hits:
@@ -141,10 +168,13 @@ def curate_bm25_sets(
             f"bm25 produced zero forget rows from {dataset_id} "
             f"(window_size={window_size} stride={stride})"
         )
+    avg_docs = sum(docs_used_per_song) / len(docs_used_per_song) if docs_used_per_song else 0.0
     logger.info(
-        "bm25: %d songs -> %d forget windows (dataset=%s, window_size=%d, stride=%d, cap=%d)",
+        "bm25: %d songs -> %d forget windows "
+        "(dataset=%s, window_size=%d, stride=%d, cap=%d, per_hit=%d, avg_docs/song=%.1f)",
         len(ordered_ids) - len(skipped_empty_span),
-        len(forget_rows), dataset_id, window_size, stride, max_hits_per_song,
+        len(forget_rows), dataset_id, window_size, stride,
+        max_hits_per_song, max_windows_per_hit, avg_docs,
     )
 
     retain_rows = load_wikitext_retain_rows(

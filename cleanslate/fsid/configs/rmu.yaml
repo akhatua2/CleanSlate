@@ -16,7 +16,8 @@ weight_decay: 0.0
 warmup_steps: 20
 max_grad_norm: 1.0
 output_dir: runs
-save_every: 100
+save_every: 200
+save_total_limit: 20
 log_every: 10
 dtype: bfloat16
 optim: paged_adamw_8bit
