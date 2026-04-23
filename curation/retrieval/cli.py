@@ -27,6 +27,8 @@ def _add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--shard-range", default=None, help="Build only a slice of shards, e.g. '0:7' for shards 0..6 (half-open). Useful for distributed builds across multiple machines.")
     parser.add_argument("--dolma-dir", default=None)
     parser.add_argument("--curation-root", default=None)
+    parser.add_argument("--index-dir", dest="index_dir_override", default=None,
+                        help="Skip hash-based lookup; load an FM-index / BM25 index from this path")
     parser.add_argument("--dataset-path", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--content-id", dest="content_ids", action="append", default=[])
@@ -51,6 +53,7 @@ def _cfg(args: argparse.Namespace) -> Cfg:
         fm_parallel=args.fm_parallel,
         dolma_root=args.dolma_dir,
         curation_root=args.curation_root,
+        index_dir_override=args.index_dir_override,
         dataset_path=args.dataset_path,
     )
 

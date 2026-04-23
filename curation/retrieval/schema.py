@@ -32,6 +32,7 @@ class Cfg:
     fm_parallel: int = 1  # build this many FM-index shards concurrently (infini_gram_mini only)
     dolma_root: str | None = None
     curation_root: str | None = None
+    index_dir_override: str | None = None
     dataset_path: str | None = None
     dataset_id: str = "unlearning-cleanslate/cleanslate_dataset"
     dataset_config: str = "default"
@@ -100,6 +101,8 @@ class Cfg:
 
     @property
     def index_dir(self) -> Path:
+        if self.index_dir_override:
+            return Path(self.index_dir_override)
         return self.curation_path / "indices" / self.variant / self.method / self.index_hash
 
     @property
