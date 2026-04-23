@@ -23,11 +23,21 @@ import modal
 REPO = "https://github.com/akhatua2/CleanSlate.git"
 BRANCH = os.environ.get("CLEANSLATE_BRANCH", "main")
 
+# Resolve the current SHA of BRANCH so Modal's image-layer cache invalidates
+# when new commits land. Without this, `git clone` layers get reused with
+# stale source because the command string never changes.
+try:
+    SHA = subprocess.check_output(
+        ["git", "ls-remote", REPO, BRANCH], text=True,
+    ).split()[0][:12]
+except Exception:
+    SHA = "unknown"
+
 train_image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu24.04", add_python="3.12")
     .entrypoint([])
     .apt_install("git")
-    .run_commands(f"git clone -b {BRANCH} {REPO} /app")
+    .run_commands(f"git clone -b {BRANCH} {REPO} /app  # sha={SHA}")
     .uv_pip_install("/app[unlearning,eval]", "hf-transfer==0.1.9", extra_options="-e")
     .env({
         "HF_HOME": "/model_cache",
