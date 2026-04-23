@@ -26,7 +26,7 @@ eval = [
 ]
 dev = ["ruff", "mypy", "pytest"]
 curation = ["polars", "zstandard", "bm25s", "numpy"]
-unlearning = ["accelerate>=0.34"]
+unlearning = ["accelerate>=0.34", "modal==1.4.2"]
 
 [project.scripts]
 cleanslate = "cleanslate.cli:main"

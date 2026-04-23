@@ -336,6 +336,7 @@ eval = [
 ]
 unlearning = [
     { name = "accelerate" },
+    { name = "modal" },
 ]
 
 [package.metadata]
@@ -347,6 +348,7 @@ requires-dist = [
     { name = "lm-eval", extras = ["api"], marker = "extra == 'eval'", specifier = "==0.4.11" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "modal", marker = "extra == 'eval'", specifier = "==1.4.2" },
+    { name = "modal", marker = "extra == 'unlearning'", specifier = "==1.4.2" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numpy", marker = "extra == 'curation'" },
     { name = "polars", marker = "extra == 'curation'" },
