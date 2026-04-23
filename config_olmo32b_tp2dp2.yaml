@@ -1,0 +1,14 @@
+eval:
+  window_prefix_len: 100
+  window_suffix_len: 100
+  window_stride: 10
+  tau_min: 0.001
+  batch_size: 2048       # prompts are <=80 tokens; bigger batches fill vLLM scheduler
+
+vllm:
+  num_gpus: 2            # tensor_parallel_size per DP replica
+  data_parallel: 2       # 2 replicas * 2 TP = 4 GPUs
+  gpu_memory_utilization: 0.92
+  max_model_len: 512     # prefix+suffix are <=80 tokens; smaller frees KV cache
+  dtype: bfloat16
+  enforce_eager: false

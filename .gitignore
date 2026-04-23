@@ -47,3 +47,10 @@ Thumbs.db
 .ipynb_checkpoints/
 
 tables/
+
+# Curation runtime artifacts (matches fix/char-based-windowing gitignore)
+curation/checkpoints/
+curation/indices/
+curation/outputs/
+curation/temp/
+curation/vendor/

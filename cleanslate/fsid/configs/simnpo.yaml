@@ -1,0 +1,31 @@
+model_name: null
+forget_path: null
+objective: simnpo
+npo_beta: 2.0             # lower β = broader sigmoid = stronger unlearning gradient
+simnpo_delta: 0.25        # delta = old_gamma / beta = 0.5 / 2.0 (OU parameterization)
+retain_path: null
+forget_weight: 5.0        # 40× higher than gentle preset — dominate the loss
+retain_weight: 1.0
+retain_loss_type: nll
+num_epochs: 2
+batch_size: 2
+gradient_accum_steps: 16
+lr: 5.0e-5
+weight_decay: 0.0
+warmup_steps: 10
+max_grad_norm: 1.0
+output_dir: runs
+save_every: 0
+log_every: 10
+validation_path: null
+eval_every: 50
+eval_max_samples: 200
+device: auto
+dtype: bfloat16
+distributed_strategy: single
+fsdp_sharding_strategy: full_shard
+fsdp_cpu_offload: false
+seed: 42
+num_workers: 0
+gradient_checkpointing: false
+torch_compile: false

@@ -63,14 +63,11 @@ Run lm-evaluation-harness benchmarks via vLLM to measure model utility.
 # Run default benchmarks (mmlu, hellaswag, arc_easy, arc_challenge)
 cleanslate validate -m "Qwen/Qwen3-8B"
 
-# Specific benchmarks with a sample limit for quick testing
-cleanslate validate -m qwen-8b -B mmlu,gsm8k -n 100
+# Specific benchmarks
+cleanslate validate -m qwen-8b -B mmlu,gsm8k
 
 # CleanSlate QA benchmark (LLM judge via Gemini, requires GEMINI_API_KEY)
 cleanslate validate -m qwen-8b -B cleanslate_qa
-
-# Compare against a previous run
-cleanslate validate -m qwen-8b --compare results/validation/qwen3-8b.json
 
 # Multi-GPU
 cleanslate validate -m olmo-32b --tp-size 4
@@ -82,14 +79,12 @@ cleanslate validate -m olmo-32b --tp-size 4
 |------|-------------|---------|
 | `-m, --model` | HF model name or alias (required) | — |
 | `-B, --benchmarks` | Comma-separated lm-eval tasks | `mmlu,hellaswag,arc_easy,arc_challenge` |
-| `-n, --limit` | Max items per task | all |
 | `--num-fewshot` | Few-shot count override | task default |
 | `--batch-size` | Batch size | `auto` |
 | `--gpu-mem` | vLLM GPU memory fraction | `0.90` |
 | `--tp-size` | Tensor parallel size | `1` |
 | `--max-model-len` | Max sequence length | `4096` |
-| `-o, --output` | Path to save JSON results | `results/validation/<model>.json` |
-| `--compare` | Previous validation JSON for comparison | — |
+| `-o, --output` | Output directory; final JSON lands at `<dir>/<model_clean>.json` | `results/validation/<model>` |
 
 ### Model Aliases
 

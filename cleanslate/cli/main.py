@@ -9,13 +9,19 @@ import typer
 from rich.console import Console
 
 from cleanslate.cli.eval import eval_cmd
-from cleanslate.cli.validate import validate_cmd
+from cleanslate.cli.fsid import fsid_app
+from cleanslate.cli.score import score_cmd
+from cleanslate.cli.validate import generate_cmd, judge_cmd, validate_cmd
 
 app = typer.Typer(name="cleanslate", help="Memorization evaluation and unlearning for LLMs.")
 console = Console()
 
 app.command(name="eval")(eval_cmd)
+app.command(name="generate")(generate_cmd)
+app.command(name="judge")(judge_cmd)
 app.command(name="validate")(validate_cmd)
+app.command(name="score")(score_cmd)
+app.add_typer(fsid_app)
 
 
 def _silence_stderr_at_exit() -> None:

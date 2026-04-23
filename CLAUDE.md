@@ -4,16 +4,15 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Overview
 
-CleanSlate is a **sliding window memorization evaluation framework** for LLMs. It measures whether a model has memorized specific text by computing extraction probability (p_z) across overlapping character-level windows using vLLM for inference.
+CleanSlate is a **sliding-window memorization evaluation and unlearning framework** for LLMs. It measures whether a model has memorized specific text by computing extraction probability (p_z) across overlapping character-level windows using vLLM, then drives an unlearning pipeline that removes memorized content while preserving utility.
 
 Based on:
 - Cooper et al. "Extracting memorized pieces of copyrighted books"
 - Hayes et al. "Measuring memorization in language models"
 
-Primary workflow:
-- **Memorization Evaluation** — Slide a window across text, compute p_z = P(suffix | prefix) via teacher forcing using vLLM prompt logprobs
-
-FSID (Forget Set IDentification) unlearning pipeline is planned but not yet implemented in v2.
+Two workflows:
+- **Memorization Evaluation** (`cleanslate eval`) — slide a window across text, compute p_z = P(suffix | prefix) via teacher forcing using vLLM prompt logprobs
+- **FSID Unlearning** (`cleanslate fsid ...`) — build a forget-request pool from eval results, curate forget/retain training data, train an unlearned checkpoint, score pre vs post memorization
 
 ## Development Commands
 
@@ -21,10 +20,13 @@ FSID (Forget Set IDentification) unlearning pipeline is planned but not yet impl
 ```bash
 uv sync
 
-# For validation benchmarks (adds lm-eval):
+# Validation benchmarks (adds lm-eval):
 uv sync --extra eval
 
-# For development (ruff, mypy, pytest):
+# Unlearning training (adds accelerate):
+uv sync --extra unlearning
+
+# Development (ruff, mypy, pytest):
 uv sync --extra dev
 ```
 
@@ -32,17 +34,41 @@ uv sync --extra dev
 
 ```bash
 # Sliding window memorization evaluation
-cleanslate eval \
-  -d unlearning-cleanslate/cleanslate_dataset \
-  -c default \
-  -m "Qwen/Qwen3-8B" \
-  -n 100 \
-  -o results/eval
+cleanslate eval -d unlearning-cleanslate/cleanslate_dataset -m "Qwen/Qwen3-8B" -n 100 -o results/eval
 
-# Validation benchmarks (requires lm-eval extra)
+# Validation benchmarks (requires [eval])
 cleanslate validate -m "Qwen/Qwen3-8B" -B mmlu,hellaswag
 cleanslate validate -m qwen-8b -B cleanslate_qa
-cleanslate validate -m qwen-8b --compare results/validation/qwen3-8b.json
+# Pre/post comparison lives in `cleanslate score --pre-validation --post-validation`
+
+# Two-phase form: generate once, judge repeatedly (and in parallel)
+# Phase A persists samples_*.jsonl under <output>/generations/ so a flaky
+# judge (Gemini 5xx, rate limits) can be retried without rerunning vLLM.
+cleanslate generate -m qwen-8b -B cleanslate_qa -o results/validation/qwen-8b
+cleanslate judge -i results/validation/qwen-8b -o results/validation/qwen-8b.json
+
+# Publish generations as an HF dataset (one config per benchmark).
+# Repo name: <hf-org>/generations-<model_clean>[-<push-suffix>]
+cleanslate generate -m qwen-8b -B mmlu,cleanslate_qa -o results/validation/qwen-8b \
+  --push-to-hub --push-suffix corpus_sweep_post_eval
+cleanslate validate -m qwen-8b -B mmlu,cleanslate_qa --push-to-hub \
+  --push-suffix corpus_sweep_post_eval -o results/validation/qwen-8b.json
+
+# Task presets: `full` expands to the 12-benchmark retention suite
+# (mmlu, triviaqa, cleanslate_qa, gsm8k, hellaswag, winogrande, drop,
+#  arc_challenge, humaneval_plus, bbh, lambada_openai, coqa). Mixable
+# with individual tasks: `-B full,mmlu_pro`.
+cleanslate validate -m qwen-8b -B full -o results/validation/qwen-8b.json \
+  --push-to-hub --push-suffix full_suite
+
+# FSID unlearning pipeline (requires [unlearning])
+cleanslate fsid build-pool --eval-dataset <hf_dataset> --threshold 0.30 -o data/fsid/pool
+cleanslate fsid curate --rule baseline --forget-pool-path data/fsid/pool/forget.parquet -o data/fsid/curated/baseline
+cleanslate fsid train --config cleanslate/fsid/configs/npo.yaml -m qwen-8b \
+  --forget-path data/fsid/curated/baseline/forget_set.parquet \
+  --retain-path data/fsid/curated/baseline/retain_set.parquet -o runs
+cleanslate score --forget-path data/fsid/curated/baseline/forget_set.parquet \
+  --pre-eval results/eval/pre.parquet --post-eval results/eval/post.parquet -o results/fsid/score.json
 ```
 
 ### Code Quality
@@ -109,13 +135,15 @@ Single backend: **vLLM** (requires vllm >= 0.19.0).
 
 **Entry point**: `cleanslate = "cleanslate.cli:main"`
 
-- `main.py`: Typer app setup, registers `eval` and `validate` commands
+- `main.py`: Typer app setup, registers `eval`, `generate`, `judge`, `validate`, `score`, and the `fsid` sub-app (`build-pool`, `curate`, `train`)
 - `eval.py`: `eval_cmd()` — loads HF dataset, filters items, runs `sliding_window_batch()`, saves to Parquet, optionally pushes to HF Hub
 - `validate.py`: `validate_cmd()` — runs lm-eval benchmarks via vLLM, displays results table, saves JSON, optionally compares with a previous run
   - Options: `-d` (HF dataset), `-c` (HF config), `--text-col`, `-n` (limit), `--offset`, `-m` (model), `-o` (output dir), `--hf-org`, `--no-push`, `--config` (YAML path)
   - Default dataset: `unlearning-cleanslate/cleanslate_dataset`
   - Metadata columns: `content_id`, `content_title`, `content_creators`, `content_year`
 - `aliases.py`: `MODEL_ALIASES` dict and `resolve_model(model) -> (hf_path, clean_name)`
+- `fsid.py`: `fsid_app` Typer sub-app — `build_pool`, `curate`, `train` subcommands
+- `score.py`: top-level `cleanslate score` — compares pre/post memorization artifacts (and optional pre/post validation JSON)
 
 **Model aliases**:
 ```
@@ -129,28 +157,65 @@ gemma-12b     → google/gemma-3-12b-pt
 
 ### Validation (`cleanslate/validation/`)
 
-Integration with lm-evaluation-harness for benchmark validation.
+Integration with lm-evaluation-harness for benchmark validation. Three CLI verbs, two phases:
 
-- `run_validation(model_name, tasks, *, limit, num_fewshot, batch_size, gpu_memory_utilization, tp_size, max_model_len)` — runs lm-eval with vLLM backend, returns `dict[str, BenchmarkResult]`
+- `cleanslate generate` → `run_generate(model_name, tasks, output_dir, ...)` — invokes `lm_eval.simple_evaluate(..., predict_only=True, evaluation_tracker=EvaluationTracker(output_path=<dir>))`. Skips metrics entirely; writes per-sample JSONL to `<dir>/**/samples_{task}_{date}.jsonl` so vLLM output survives any judge failure.
+- `cleanslate judge` → `judge_generations(samples_dir, model_name)` — reads the samples JSONL, dispatches per task:
+  - Tasks in `_JUDGE_TASKS` (currently `{cleanslate_qa}`): `ThreadPoolExecutor(max_workers=50)` over Gemini calls via `is_correct`. Fails loudly (re-raises) if the judge itself errors after its retry budget — generations are already durable, so the fix is `cleanslate judge` again.
+  - Other tasks (MCQ-style): replay lm-eval's own `task.process_results(doc, resps)` on each saved sample, so scoring logic stays authoritative.
+- `cleanslate validate` — end-to-end wrapper: `generate` then `judge`. Same output shape as before; generations are persisted in between under `<output>/generations/` so a flaky judge no longer throws away hours of vLLM work.
+- `run_validation(model_name, tasks, ...)` — the legacy one-shot path (lm-eval with metrics inline); still exported and still works if you want the old behavior.
 - `BenchmarkResult` (dataclass in `base.py`): `benchmark_name`, `model_name`, `accuracy`, `num_correct`, `num_total`, `per_subset`, `eval_time_seconds`, `metadata`. Method: `to_dict()`
 - `SubsetResult` (dataclass in `base.py`): `name`, `accuracy`, `num_correct`, `num_total`
 - `save_validation()`, `load_validation()` — JSON persistence
 - `compare_validations()` — returns list of `ValidationDelta` (pre/post accuracy comparison)
 - `ValidationDelta` (dataclass in `results.py`): `benchmark_name`, `pre_accuracy`, `post_accuracy`, `delta_accuracy`, `relative_retention`
-- `judge.py`: `is_correct(reference, model_answer)` — binary QA judging via Gemini (`gemini-3.1-flash-lite-preview`) through LiteLLM. Requires `GEMINI_API_KEY` env var.
+- `judge.py`: `is_correct(reference, model_answer, *, max_retries=5)` — binary QA judging via Gemini (`gemini-3.1-flash-lite-preview`) through LiteLLM. Retries transient errors (`ServiceUnavailableError`, `RateLimitError`, `APIConnectionError`, `Timeout`, `InternalServerError`, `json.JSONDecodeError`) with exponential backoff (`2**attempt`) and **raises the original exception on exhaustion** — no silent `return False`. Requires `GEMINI_API_KEY` env var.
 
 **Custom lm-eval tasks** (`validation/tasks/`):
-- `cleanslate_qa.yaml` — QA benchmark against `unlearning-cleanslate/cleanslate_dataset` (config: `qa_benchmark`). Uses `llm_judge_match` as the sole metric (Gemini-based semantic answer matching).
-- `utils.py` — `llm_judge_match(references, predictions)` metric function for lm-eval
+- `cleanslate_qa.yaml` — QA benchmark against `unlearning-cleanslate/cleanslate_dataset` (config: `qa_benchmark`). Uses `llm_judge_match` as the sole metric (Gemini-based semantic answer matching). Only relevant for the legacy `run_validation` path; the new `judge_generations` applies the threadpool judge directly.
+- `utils.py` — `llm_judge_match(references, predictions)` metric function for lm-eval (legacy path only).
 
 ### FSID Module (`cleanslate/fsid/`)
 
-Placeholder — unlearning pipeline planned but not yet implemented in v2.
+Unlearning pipeline.
+
+**Config** (`fsid/config.py`):
+- `TrainerConfig` (dataclass): all training + data + distributed + logging knobs. Types: `ObjectiveType = Literal["ga", "npo", "simnpo", "rmu", "undial"]`, `DistributedStrategyType = Literal["single", "fsdp"]`, `RetainLossType = Literal["nll", "kl", "embed_diff"]`.
+- `load_config(yaml_path, *, cli_overrides)` — YAML + CLI merge. Raises on unknown keys and invalid values.
+
+**Data** (`fsid/datasets/`):
+- `io.py :: load_local_records(path)` — parquet / json / jsonl / HF dataset ID.
+- `pool.py :: build_candidate_pool(...)`, `split_pool_records(...)`, `save_pool_datasets(...)` — stratified memorization pool, forget/retain split, parquet writes.
+- `unlearning.py :: ForgetPairDataset`, `TextSequenceDataset`, `build_forget_pairs(...)`, `build_forget_pairs_from_windows(...)`, `tokenize_text_rows(...)`, `collate_text_sequences(...)`.
+
+**Rules** (`fsid/rules/`):
+- `FORGET_SET_RULES` registry: `baseline` (direct-lyric forget rows) and `corpus_sweep` (dolma-matched windows from `unlearning-cleanslate/corpus_sweep_cleanslate_dataset`).
+- `baseline.py :: curate_baseline_sets(...)`, `save_curated_sets(output_dir, forget_rows, retain_rows, metadata)`.
+- `corpus_sweep.py :: curate_corpus_sweep_sets(...)`.
+- `_retain.py :: load_wikitext_retain_rows(...)` — shared retain loader.
+
+**Training** (`fsid/training/`):
+- `modeling.py :: load_tokenizer(model_name)`, `load_model(config, *, device_map)` — HF `AutoModelForCausalLM` + rope_scaling patch + FSDP-uniform dtype.
+- `losses.py`: `compute_batch_nll`, `compute_npo_loss`, `compute_simnpo_loss`, `compute_undial_loss`, `compute_rmu_forget_loss`, `compute_activation_mse`, `compute_embed_diff_retain_loss`, `compute_kl_retain_loss`, `forward_with_cache`. UNDIAL and RMU replicate open-unlearning bugs for byte-parity with `scripts/verify_tofu.py`; see per-function docstrings.
+- `data.py :: ForgetRetainDataset` (anchored pair dataset), `UnlearnDataCollator` (nested forget/retain collator).
+- `trainer.py :: CleanSlateUnlearnTrainer` (extends HF `Trainer`, dispatches by objective), `train_unlearning(config)` entry point.
+
+**Scoring** (`fsid/scoring.py`):
+- `compute_score(*, forget_set_path, pre_eval_path, post_eval_path) -> UnlearningScore`
+- `save_score(score, path)`
+- Dataclasses: `WindowDelta`, `ContentDelta`, `UnlearningScore`.
+
+**Configs** (`fsid/configs/`): `ga.yaml`, `npo.yaml`, `simnpo.yaml`, `simnpo_gentle.yaml`.
+
+**QA generation pipeline** (`fsid/qa/` — unchanged from v2): `extract → generate → filter → push` stages that build `unlearning-cleanslate/cleanslate_dataset:qa_benchmark` for `cleanslate validate -B cleanslate_qa`.
 
 ## Dependencies
 
 **Core** (always installed): `vllm==0.19.0`, `torch==2.10.0`, `transformers==4.57.6`, `pyarrow==23.0.1`, `pyyaml==6.0.3`, `datasets==4.7.0`, `typer==0.24.1`, `rich==14.3.3`, `tqdm==4.67.3`
-**Validation** (`[eval]`): `lm-eval==0.4.11`, `litellm`
+**Validation** (`[eval]`): `lm-eval==0.4.11`, `litellm`, `python-dotenv`
+**Unlearning** (`[unlearning]`): `accelerate>=0.34`
+**Curation** (`[curation]`): `polars`, `zstandard`, `bm25s`, `numpy`
 **Dev** (`[dev]`): `ruff`, `mypy`, `pytest`
 
 Requires Python 3.12. Uses `hatchling` build backend. Managed with `uv` (lockfile: `uv.lock`).

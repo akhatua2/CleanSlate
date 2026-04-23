@@ -34,6 +34,10 @@ def eval_cmd(
     output_dir: str = typer.Option("results/eval", "-o", "--output"),
     hf_org: str = typer.Option("unlearning-cleanslate", "--hf-org"),
     no_push: bool = typer.Option(False, "--no-push"),
+    push_suffix: str | None = typer.Option(
+        None, "--push-suffix",
+        help="Suffix appended to the HF repo name: eval-<model_clean>-<suffix>.",
+    ),
     config_path: str | None = typer.Option(None, "--config", help="Path to YAML config file"),
 ) -> None:
     """Sliding window memorization evaluation.
@@ -54,7 +58,10 @@ def eval_cmd(
 
     # Load dataset
     console.print("[bold]Loading dataset...[/bold]")
-    ds = load_dataset(hf_dataset, hf_config, split="train", streaming=True)
+    ds = load_dataset(hf_dataset, hf_config, split="train")
+    keep_cols = [text_col, *METADATA_COLUMNS]
+    keep_cols = [c for c in keep_cols if c in ds.column_names]
+    ds = ds.select_columns(keep_cols)
     items: list[dict[str, Any]] = []
     for i, row in enumerate(ds):
         if i < offset:
@@ -172,7 +179,10 @@ def eval_cmd(
     if not no_push and all_records:
         from datasets import Dataset as HFDataset
 
-        repo = f"{hf_org}/eval-{model_clean}"
+        repo_name = f"eval-{model_clean}"
+        if push_suffix:
+            repo_name = f"{repo_name}-{push_suffix}"
+        repo = f"{hf_org}/{repo_name}"
         HFDataset.from_list(all_records).push_to_hub(repo, config_name=hf_config)
         console.print(f"\n[green]Pushed to {repo}[/green]")
 
