@@ -116,6 +116,7 @@ def _train_impl(
         "--forget-path", forget_override or forget_path(model_alias, rule),
         "--retain-path", retain_override or retain_path(model_alias, rule),
         "--output-dir", output_dir,
+        "--gradient-checkpointing",
     ]
     if n_gpus > 1:
         cli_args += ["--distributed-strategy", "fsdp"]
