@@ -5,8 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 
-import litellm  # type: ignore[import-untyped]
+import litellm
+from litellm import (  # type: ignore[attr-defined]
+    APIConnectionError,
+    InternalServerError,
+    RateLimitError,
+    ServiceUnavailableError,
+    Timeout,
+)
 
 _GEMINI_MODEL = "gemini/gemini-3.1-flash-lite-preview"
 
@@ -43,6 +51,15 @@ REFERENCE: {reference}
 CANDIDATE: {model_answer}
 GRADE:"""
 
+_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    ServiceUnavailableError,
+    RateLimitError,
+    APIConnectionError,
+    Timeout,
+    InternalServerError,
+    json.JSONDecodeError,
+)
+
 
 def _remote_judge(reference: str, model_answer: str) -> bool:
     base_url = os.environ["JUDGE_BASE_URL"]
@@ -62,32 +79,33 @@ def _remote_judge(reference: str, model_answer: str) -> bool:
 
 
 def _gemini_judge(reference: str, model_answer: str, *, max_retries: int) -> bool:
+    """Gemini judge with exponential-backoff retry on transient errors; raises
+    loudly on exhaustion (no silent `return False`)."""
     for attempt in range(max_retries):
-        response = litellm.completion(
-            model=_GEMINI_MODEL,
-            messages=[
-                {
+        try:
+            response = litellm.completion(
+                model=_GEMINI_MODEL,
+                messages=[{
                     "role": "user",
                     "content": _CHAT_PROMPT.format(reference=reference, model_answer=model_answer),
-                }
-            ],
-            temperature=1.0,
-            max_tokens=50,
-        )
-        content = response.choices[0].message.content or ""
-        content = re.sub(r"^```(?:json)?\n?", "", content.strip())
-        content = re.sub(r"\n?```$", "", content)
-        try:
+                }],
+                temperature=1.0,
+                max_tokens=50,
+            )
+            content = response.choices[0].message.content or ""
+            content = re.sub(r"^```(?:json)?\n?", "", content.strip())
+            content = re.sub(r"\n?```$", "", content)
             return bool(json.loads(content).get("correct", False))
-        except json.JSONDecodeError:
-            if attempt < max_retries - 1:
-                continue
-            raise ValueError(f"Judge failed after {max_retries} retries: {content}")
-    return False
+        except _TRANSIENT_ERRORS:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
-def is_correct(reference: str, model_answer: str, *, max_retries: int = 3) -> bool:
-    """Judge if answer is correct. Routes to remote vLLM completion if JUDGE_BASE_URL set."""
+def is_correct(reference: str, model_answer: str, *, max_retries: int = 5) -> bool:
+    """Judge if answer is correct. Routes to remote vLLM completion if
+    JUDGE_BASE_URL is set, otherwise Gemini via LiteLLM (with retries)."""
     if os.environ.get("JUDGE_BASE_URL"):
         return _remote_judge(reference, model_answer)
     return _gemini_judge(reference, model_answer, max_retries=max_retries)

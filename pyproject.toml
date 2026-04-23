@@ -13,11 +13,20 @@ dependencies = [
     "typer==0.24.1",
     "rich==14.3.3",
     "tqdm==4.67.3",
+    "matplotlib>=3.10.8",
 ]
 
 [project.optional-dependencies]
-eval = ["lm-eval[api]==0.4.11", "litellm==1.83.0", "python-dotenv==1.0.1", "modal==1.4.2"]
+eval = [
+    "lm-eval[api]==0.4.11",
+    "litellm==1.83.0",
+    "python-dotenv==1.0.1",
+    "ray>=2.9",
+    "modal==1.4.2",
+]
 dev = ["ruff", "mypy", "pytest"]
+curation = ["polars", "zstandard", "bm25s", "numpy"]
+unlearning = ["accelerate>=0.34"]
 
 [project.scripts]
 cleanslate = "cleanslate.cli:main"
