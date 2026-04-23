@@ -13,7 +13,7 @@ from itertools import product
 
 import modal
 
-from modal_train import app, train_1gpu, train_2gpu, train_8gpu
+from modal_train import app, train_4gpu, train_8gpu
 
 # ---------------------------------------------------------------------------
 # Matrix (extend these to grow the sweep)
@@ -33,13 +33,14 @@ RULES: list[str] = ["baseline"]
 # objective_label → preset config stem under cleanslate/fsid/configs/
 PRESETS: dict[str, str] = {"simnpo": "simnpo"}
 
-# Model alias → which Modal function to dispatch to.
+# Speed-optimal GPU counts (FSDP shards params + grads + optimizer across ranks).
+# 7-12B fit comfortably on 4× H100 for SimNPO (no ref model); 32B needs 8× H100.
 GPU_FN: dict[str, modal.Function] = {
-    "llama-8b": train_1gpu,
-    "qwen-8b": train_1gpu,
-    "olmo-7b": train_1gpu,
-    "nemotron-9b": train_1gpu,
-    "gemma-12b": train_2gpu,
+    "llama-8b": train_4gpu,
+    "qwen-8b": train_4gpu,
+    "olmo-7b": train_4gpu,
+    "nemotron-9b": train_4gpu,
+    "gemma-12b": train_4gpu,
     "olmo-32b": train_8gpu,
 }
 

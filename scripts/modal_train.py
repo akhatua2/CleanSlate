@@ -116,7 +116,6 @@ def _train_impl(
         "--forget-path", forget_override or forget_path(model_alias, rule),
         "--retain-path", retain_override or retain_path(model_alias, rule),
         "--output-dir", output_dir,
-        "--gradient-checkpointing",
     ]
     if n_gpus > 1:
         cli_args += ["--distributed-strategy", "fsdp"]
@@ -185,6 +184,21 @@ def train_2gpu(
     forget_override: str | None = None, retain_override: str | None = None,
 ) -> str:
     return _train_impl(model, rule, objective, preset, n_gpus=2,
+                       forget_override=forget_override, retain_override=retain_override)
+
+
+@app.function(
+    image=train_image,
+    gpu="H100:4",
+    volumes=VOLUMES,
+    secrets=[hf_secret],
+    timeout=6 * 60 * 60,
+)
+def train_4gpu(
+    model: str, rule: str, objective: str, preset: str,
+    forget_override: str | None = None, retain_override: str | None = None,
+) -> str:
+    return _train_impl(model, rule, objective, preset, n_gpus=4,
                        forget_override=forget_override, retain_override=retain_override)
 
 
