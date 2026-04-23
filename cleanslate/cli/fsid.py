@@ -14,7 +14,6 @@ from rich.console import Console
 
 from cleanslate.cli.aliases import resolve_model
 from cleanslate.fsid.config import (
-    ALLOWED_DISTRIBUTED_STRATEGIES,
     ALLOWED_FSDP_SHARDING_STRATEGIES,
     ALLOWED_OBJECTIVES,
     ALLOWED_RETAIN_LOSS_TYPES,
@@ -56,6 +55,13 @@ def build_pool(
         None, "--forget-fraction", help="Fraction of pool marked for unlearning, in (0, 1]"
     ),
     output_root: str = typer.Option("data/fsid/pool", "--output-dir", "-o"),
+    source_dataset: str = typer.Option(
+        "unlearning-cleanslate/cleanslate_dataset",
+        "--source-dataset",
+        help="HF dataset to backfill reference_target from when eval rows lack it. "
+             "Pass '' to disable.",
+    ),
+    source_text_col: str = typer.Option("reference_target", "--source-text-col"),
 ) -> None:
     """Stratified memorization pool → pool.parquet + forget.parquet + retain.parquet."""
     pool_rows, stats = build_candidate_pool(
@@ -68,6 +74,8 @@ def build_pool(
         num_bins=num_bins,
         seed=seed,
         deduplicate=deduplicate,
+        source_dataset=source_dataset or None,
+        source_text_col=source_text_col,
     )
     forget_rows, retain_rows = split_pool_records(
         pool_rows, forget_fraction=forget_fraction, num_bins=num_bins, seed=seed,
@@ -115,6 +123,10 @@ def curate(
     retain_config: str = typer.Option("wikitext-103-raw-v1", "--retain-config"),
     retain_split: str = typer.Option("validation", "--retain-split"),
     retain_samples: int | None = typer.Option(None, "--retain-samples"),
+    max_hits_per_song: int = typer.Option(
+        32, "--max-hits-per-song",
+        help="Cap on forget windows per content_id for retrieval rules (bm25, igm).",
+    ),
 ) -> None:
     """Turn a forget-song pool into (forget_set.parquet, retain_set.parquet, metadata.json)."""
     try:
@@ -133,6 +145,7 @@ def curate(
         retain_config=retain_config,
         retain_split=retain_split,
         retain_samples=retain_samples,
+        max_hits_per_song=max_hits_per_song,
     )
 
     out_dir = output_dir or str(Path("data/fsid/curated") / rule.name)
@@ -184,28 +197,34 @@ def train(
         None, "--retain-loss-type",
         help=f"Retain loss: {', '.join(ALLOWED_RETAIN_LOSS_TYPES)}",
     ),
-    device: str | None = typer.Option(None, "--device"),
     dtype: str | None = typer.Option(None, "--dtype"),
-    distributed_strategy: str | None = typer.Option(
-        None, "--distributed-strategy",
-        help=f"Distributed: {', '.join(ALLOWED_DISTRIBUTED_STRATEGIES)}",
-    ),
     fsdp_sharding_strategy: str | None = typer.Option(
         None, "--fsdp-sharding-strategy",
         help=f"FSDP sharding: {', '.join(ALLOWED_FSDP_SHARDING_STRATEGIES)}",
     ),
-    fsdp_cpu_offload: bool | None = typer.Option(None, "--fsdp-cpu-offload/--no-fsdp-cpu-offload"),
     num_workers: int | None = typer.Option(None, "--num-workers"),
     seed: int | None = typer.Option(None, "--seed"),
     log_every: int | None = typer.Option(None, "--log-every"),
-    save_every: int | None = typer.Option(None, "--save-every"),
-    eval_every: int | None = typer.Option(None, "--eval-every"),
-    eval_max_samples: int | None = typer.Option(None, "--eval-max-samples"),
-    validation_path: str | None = typer.Option(None, "--validation-path"),
+    save_every: int | None = typer.Option(
+        None, "--save-every",
+        help="Save a checkpoint every N steps during unlearning (0 = final only).",
+    ),
+    save_total_limit: int | None = typer.Option(
+        None, "--save-total-limit",
+        help="Max number of intermediate checkpoints to retain (default 2).",
+    ),
     gradient_checkpointing: bool | None = typer.Option(
         None, "--gradient-checkpointing/--no-gradient-checkpointing"
     ),
     torch_compile: bool | None = typer.Option(None, "--torch-compile/--no-torch-compile"),
+    push_to_hub: bool | None = typer.Option(
+        None, "--push-to-hub/--no-push-to-hub",
+        help="Push the trained checkpoint (weights + config.yaml + train_summary.json) to HF.",
+    ),
+    hub_repo_id: str | None = typer.Option(
+        None, "--hub-repo-id",
+        help="Target HF repo id, e.g. 'unlearning-cleanslate/qwen3-8b-unlearned-baseline-simnpo'.",
+    ),
 ) -> None:
     """Train an unlearned model from a YAML config (+ CLI overrides)."""
     from cleanslate.fsid.training.trainer import train_unlearning
@@ -229,20 +248,18 @@ def train(
         "forget_weight": forget_weight,
         "retain_weight": retain_weight,
         "retain_loss_type": retain_loss_type,
-        "device": device,
         "dtype": dtype,
-        "distributed_strategy": distributed_strategy,
         "fsdp_sharding_strategy": fsdp_sharding_strategy,
-        "fsdp_cpu_offload": fsdp_cpu_offload,
         "num_workers": num_workers,
         "seed": seed,
         "log_every": log_every,
         "save_every": save_every,
-        "eval_every": eval_every,
-        "eval_max_samples": eval_max_samples,
-        "validation_path": validation_path,
+        "save_total_limit": save_total_limit,
         "gradient_checkpointing": gradient_checkpointing,
         "torch_compile": torch_compile,
+        "push_to_hub": push_to_hub,
+        "hub_repo_id": hub_repo_id,
+        "hub_private": None,
     }
 
     if config_path is not None:
@@ -262,7 +279,5 @@ def train(
     console.print(f"[bold]Forget rows:[/bold] {summary['num_forget_rows']}")
     console.print(f"[bold]Forget pairs:[/bold] {summary['num_forget_pairs']}")
     console.print(f"[bold]Retain rows:[/bold] {summary['num_retain_rows']}")
-    if summary.get("num_val_sequences", 0) > 0:
-        console.print(f"[bold]Val sequences:[/bold] {summary['num_val_sequences']}")
 
 

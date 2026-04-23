@@ -5,7 +5,6 @@ import logging
 import re
 import time
 from dataclasses import asdict
-from functools import partial
 from pathlib import Path
 from typing import Any, override
 
@@ -21,7 +20,6 @@ from cleanslate.fsid.datasets.unlearning import (
     ForgetPairDataset,
     TextSequenceDataset,
     build_forget_pairs,
-    collate_text_sequences,
     tokenize_text_rows,
 )
 from cleanslate.fsid.training.data import ForgetRetainDataset, UnlearnDataCollator
@@ -159,16 +157,18 @@ class CleanSlateUnlearnTrainer(Trainer):
 
         # Rank-count-invariant target norm. Under DDP/FSDP with N ranks each generating
         # an independent random unit vector, gradient averaging across ranks ≈ 1-GPU
-        # training against the mean vector; in high-d the average has expected norm
-        # ≈ steering_coeff / sqrt(N). Scale each rank by sqrt(world_size) so the
-        # effective post-average target norm stays rmu_steering_coeff regardless of N.
+        # training against the mean vector; with zero-mean samples (randn) the mean
+        # of N i.i.d. unit vectors has expected norm ≈ 1/sqrt(N) in high-d. Scale each
+        # rank by sqrt(world_size) so the effective post-average target norm stays
+        # rmu_steering_coeff regardless of N. (torch.rand would concentrate in the
+        # positive orthant and invalidate this cancellation.)
         world_size = int(getattr(self.args, "world_size", 1) or 1)
         effective_coeff = self.rmu_steering_coeff * (world_size ** 0.5)
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
 
         g = torch.Generator()
         g.manual_seed(int(self.rmu_control_vec_seed) + rank)
-        v = torch.rand(1, 1, dim, generator=g)
+        v = torch.randn(1, 1, dim, generator=g)
         fresh_vec = (v / v.norm()) * effective_coeff
         logger.info(
             "RMU control_vec init: dim=%d seed=%d rank=%d world_size=%d per_rank_norm=%.6f",
@@ -278,23 +278,6 @@ class CleanSlateUnlearnTrainer(Trainer):
             return total, {"forget_loss": forget_loss, "retain_loss": retain_loss}
         return total
 
-    @override
-    def prediction_step(
-        self,
-        model: Any,
-        inputs: dict[str, Any],
-        prediction_loss_only: bool,
-        ignore_keys: list[str] | None = None,
-    ) -> tuple[torch.Tensor | None, Any, Any]:
-        """Eval uses standard CE loss, not the unlearning objective."""
-        with torch.no_grad():
-            outputs = model(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                labels=inputs["labels"],
-            )
-        return (outputs.loss, None, None)
-
 
 def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
     """Entry point: train an unlearned model from a resolved TrainerConfig."""
@@ -324,27 +307,14 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         retain_examples = tokenize_text_rows(retain_rows, tokenizer)
         logger.info("Prepared %d retain sequences", len(retain_examples))
 
-    val_examples: list[dict[str, Any]] = []
-    if config.validation_path:
-        logger.info("Loading validation set from %s", config.validation_path)
-        val_rows = load_local_records(config.validation_path)
-        val_examples = tokenize_text_rows(val_rows, tokenizer)
-        if not val_examples:
-            raise ValueError(f"No validation sequences from {config.validation_path!r}")
-        val_examples = val_examples[: config.eval_max_samples]
-        logger.info("Prepared %d validation sequences", len(val_examples))
-
     forget_dataset = ForgetPairDataset(forget_pairs)
     retain_dataset = TextSequenceDataset(retain_examples) if retain_examples else None
     train_dataset = ForgetRetainDataset(forget_dataset, retain_dataset)
-    eval_dataset = TextSequenceDataset(val_examples) if val_examples else None
 
     logger.info("Loading model: %s", config.model_name)
-    device_map = "auto" if config.distributed_strategy != "fsdp" and config.device == "auto" else None
-    model = load_model(config, device_map=device_map)
+    model = load_model(config)
 
     train_collator = UnlearnDataCollator(pad_token_id=pad_id)
-    eval_collator = partial(collate_text_sequences, pad_id=pad_id) if eval_dataset is not None else None
 
     trainer = CleanSlateUnlearnTrainer(
         objective=config.objective,
@@ -360,7 +330,6 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
         data_collator=train_collator,
         processing_class=tokenizer,
     )
@@ -376,12 +345,9 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         file_handler = _setup_file_logging(run_dir / "train.log")
         _save_resolved_config(config, run_name, run_dir)
         logger.info(
-            "FSID train: model=%s objective=%s strategy=%s run_dir=%s",
-            config.model_name, config.objective, config.distributed_strategy, run_dir,
+            "FSID train: model=%s objective=%s run_dir=%s",
+            config.model_name, config.objective, run_dir,
         )
-
-    if eval_collator is not None:
-        trainer._eval_collator = eval_collator  # type: ignore[attr-defined]
 
     needs_ref = config.objective in ("npo", "rmu", "undial") or config.retain_loss_type in ("kl", "embed_diff")
     if needs_ref:
@@ -412,7 +378,6 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
         "num_forget_pairs": len(forget_pairs),
         "num_retain_rows": len(retain_rows),
         "num_retain_sequences": len(retain_examples),
-        "num_val_sequences": len(val_examples),
         "num_trainable_params": sum(p.numel() for p in model.parameters() if p.requires_grad),
         "num_total_params": sum(p.numel() for p in model.parameters()),
         "run_seconds": run_seconds,
@@ -422,6 +387,27 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
     if trainer.is_world_process_zero():
         (Path(training_args.output_dir) / "train_summary.json").write_text(json.dumps(summary, indent=2))
         logger.info("Training complete (%.1fs)", run_seconds)
+
+        if config.push_to_hub:
+            assert config.hub_repo_id is not None
+            from huggingface_hub import HfApi
+
+            api = HfApi()
+            api.create_repo(
+                repo_id=config.hub_repo_id,
+                repo_type="model",
+                private=config.hub_private,
+                exist_ok=True,
+            )
+            logger.info("Pushing checkpoint dir %s to %s", training_args.output_dir, config.hub_repo_id)
+            api.upload_folder(
+                folder_path=training_args.output_dir,
+                repo_id=config.hub_repo_id,
+                repo_type="model",
+                commit_message=f"upload {run_name}",
+            )
+            summary["hub_repo_id"] = config.hub_repo_id
+            logger.info("Pushed to https://huggingface.co/%s", config.hub_repo_id)
 
     if file_handler is not None:
         logging.getLogger(__name__).removeHandler(file_handler)

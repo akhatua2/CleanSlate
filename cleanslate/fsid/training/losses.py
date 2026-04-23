@@ -1,4 +1,5 @@
-"""Loss utilities for FSID unlearning, ported from open-unlearning patterns."""
+"""Loss utilities for FSID unlearning. Objectives follow the source papers (NPO,
+SimNPO, RMU, UNDIAL); open-unlearning is a reference implementation, not authority."""
 
 import inspect
 from typing import Any
@@ -77,7 +78,7 @@ def compute_simnpo_loss(
     beta: float,
     delta: float,
 ) -> torch.Tensor:
-    """SimNPO — line-for-line port of open-unlearning/src/trainer/unlearn/simnpo.py."""
+    """SimNPO loss (Fan et al., 2024). delta is the γ/β reparameterized offset."""
     per_sample_nll = compute_batch_nll(model, input_ids, attention_mask, labels)
     loss_mask = labels != -100
     avg_nll = per_sample_nll / loss_mask.sum(dim=-1) - delta
@@ -92,10 +93,13 @@ def compute_undial_loss(
     labels: torch.Tensor,
     beta: float,
 ) -> torch.Tensor:
-    """UNDIAL: self-distill against a teacher whose logit for the correct next-token is
-    knocked down by β before softmax.
+    """UNDIAL (Dong et al.): self-distill against a teacher whose logit for the correct
+    next-token is knocked down by β before softmax.
 
-    Line-for-line port of open-unlearning/src/trainer/utils.py::compute_undial_loss.
+    Fixes the -100 wrap bug in open-unlearning's reference: raw shift_labels contain
+    -100 at ignore positions and Python negative indexing would silently scatter into
+    vocab[V-100]. We mask ignore positions out of both the teacher adjustment and the
+    loss average.
     """
     extras = _build_extra_inputs(model, input_ids)
     outputs = model(input_ids=input_ids, attention_mask=attention_mask, **extras)
@@ -112,21 +116,23 @@ def compute_undial_loss(
         ).logits
     shift_teacher = teacher[..., :-1, :].contiguous()
 
-    # OU indexes with raw `shift_labels` (contains -100 at masked positions). Python's
-    # negative indexing wraps -100 to vocab[V-100], so the teacher distribution at
-    # masked positions has vocab[V-100] knocked down instead. Preserved for byte-parity.
+    valid = shift_labels != -100
+    safe_labels = shift_labels.masked_fill(~valid, 0)
+
     mask = torch.zeros_like(shift_teacher)
     b_idx = torch.arange(mask.shape[0], device=mask.device).view(-1, 1, 1)
     s_idx = torch.arange(mask.shape[1], device=mask.device).view(1, -1, 1)
-    mask[b_idx, s_idx, shift_labels.unsqueeze(-1)] = 1.0
+    mask[b_idx, s_idx, safe_labels.unsqueeze(-1)] = 1.0
+    mask = mask * valid.unsqueeze(-1).to(mask.dtype)
 
     soft_label = F.softmax(shift_teacher - mask * beta, dim=-1)
-    loss = F.cross_entropy(
+    per_token = F.cross_entropy(
         shift_logits.reshape(-1, shift_logits.size(-1)),
         soft_label.reshape(-1, soft_label.size(-1)),
         reduction="none",
-    )
-    return loss.mean()
+    ).reshape(shift_labels.shape)
+    valid_f = valid.to(per_token.dtype)
+    return (per_token * valid_f).sum() / valid_f.sum().clamp(min=1)
 
 
 def forward_with_cache(
@@ -165,17 +171,17 @@ def compute_activation_mse(
     act2: torch.Tensor,
     loss_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Per-sample MSE averaged over non-ignored tokens.
+    """Per-sample MSE averaged over non-ignored tokens (RMU, Li et al., WMDP).
 
-    Byte-for-byte port of open-unlearning/src/trainer/unlearn/rmu.py::compute_activation_loss.
-    OU's (b,)/(b,1) broadcast inflates to (b,b) before .mean(); we preserve this to stay
-    numerically equivalent to OU (verified via scripts/verify_tofu.py).
+    Fixes the (b,)/(b,1) broadcast in open-unlearning's reference, which inflates the
+    per-sample division to a (b, b) grid before .mean(). Here we compute a per-sample
+    scalar and then take the batch mean.
     """
     sq = F.mse_loss(act1, act2, reduction="none")
     expanded = loss_mask.unsqueeze(-1).expand_as(sq)
-    squared_diff_sum = (sq * expanded).mean(dim=2).sum(dim=1)
-    num_tokens = loss_mask.sum(dim=-1, keepdim=True).clamp(min=1)
-    return (squared_diff_sum / num_tokens).mean()
+    per_sample_sum = (sq * expanded).mean(dim=2).sum(dim=1)
+    num_tokens = loss_mask.sum(dim=-1).clamp(min=1)
+    return (per_sample_sum / num_tokens).mean()
 
 
 def compute_rmu_forget_loss(

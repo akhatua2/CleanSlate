@@ -1,5 +1,6 @@
 """Configuration for FSID unlearning training."""
 
+import os
 from dataclasses import dataclass, fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
@@ -9,21 +10,19 @@ import yaml  # type: ignore[import-untyped]
 
 
 type ObjectiveType = Literal["ga", "npo", "simnpo", "rmu", "undial"]
-type DistributedStrategyType = Literal["single", "fsdp"]
 type FSDPShardingStrategyType = Literal["full_shard", "shard_grad_op"]
 type RetainLossType = Literal["nll", "kl", "embed_diff"]
 type DType = Literal["bfloat16", "float16", "float32"]
 
 ALLOWED_OBJECTIVES: tuple[str, ...] = get_args(ObjectiveType.__value__)
 ALLOWED_DTYPES: tuple[str, ...] = get_args(DType.__value__)
-ALLOWED_DISTRIBUTED_STRATEGIES: tuple[str, ...] = get_args(DistributedStrategyType.__value__)
 ALLOWED_FSDP_SHARDING_STRATEGIES: tuple[str, ...] = get_args(FSDPShardingStrategyType.__value__)
 ALLOWED_RETAIN_LOSS_TYPES: tuple[str, ...] = get_args(RetainLossType.__value__)
 
 
 @dataclass
 class TrainerConfig:
-    """Config for FSID unlearning training."""
+    """Config for FSID unlearning training (FSDP-only; launch via torchrun/accelerate)."""
 
     model_name: str = ""
     forget_path: str = ""
@@ -56,23 +55,28 @@ class TrainerConfig:
     # UNDIAL
     undial_beta: float = 10.0
 
-    validation_path: str | None = None
-    eval_every: int = 50
-    eval_max_samples: int = 200
-
+    # Checkpointing. save_every=0 disables intermediate checkpoints; the final
+    # trained model is always saved via trainer.save_model() at end-of-run.
     save_every: int = 0
+    save_total_limit: int = 2
 
-    distributed_strategy: DistributedStrategyType = "single"
     fsdp_sharding_strategy: FSDPShardingStrategyType = "full_shard"
-    fsdp_cpu_offload: bool = False
 
-    device: str = "auto"
     dtype: DType = "bfloat16"
     seed: int = 42
     num_workers: int = 0
     log_every: int = 10
     gradient_checkpointing: bool = False
     torch_compile: bool = False
+
+    push_to_hub: bool = False
+    hub_repo_id: str | None = None
+    hub_private: bool = False
+
+    # HF Trainer optimizer name. Defaults to plain fp32 AdamW; `paged_adamw_8bit`
+    # (requires bitsandbytes) cuts optimizer-state memory ~4x which is decisive
+    # for single-GPU 8B training.
+    optim: str = "adamw_torch"
 
     def make_run_name(self) -> str:
         """Timestamped run name."""
@@ -92,8 +96,6 @@ class TrainerConfig:
             raise ValueError(f"objective must be one of {list(ALLOWED_OBJECTIVES)}, got {self.objective!r}")
         if self.dtype not in ALLOWED_DTYPES:
             raise ValueError(f"dtype must be one of {list(ALLOWED_DTYPES)}, got {self.dtype!r}")
-        if self.distributed_strategy not in ALLOWED_DISTRIBUTED_STRATEGIES:
-            raise ValueError(f"distributed_strategy must be one of {list(ALLOWED_DISTRIBUTED_STRATEGIES)}")
         if self.fsdp_sharding_strategy not in ALLOWED_FSDP_SHARDING_STRATEGIES:
             raise ValueError(f"fsdp_sharding_strategy must be one of {list(ALLOWED_FSDP_SHARDING_STRATEGIES)}")
         if self.retain_loss_type not in ALLOWED_RETAIN_LOSS_TYPES:
@@ -104,8 +106,7 @@ class TrainerConfig:
             "batch_size": self.batch_size,
             "gradient_accum_steps": self.gradient_accum_steps,
             "log_every": self.log_every,
-            "eval_every": self.eval_every,
-            "eval_max_samples": self.eval_max_samples,
+            "save_total_limit": self.save_total_limit,
         }
         for pos_name, pos_value in positive_ints.items():
             if pos_value < 1:
@@ -127,23 +128,29 @@ class TrainerConfig:
                 raise ValueError("rmu requires retain_path and retain_weight > 0")
             if self.retain_loss_type != "embed_diff":
                 raise ValueError("rmu requires retain_loss_type='embed_diff'")
-        if self.distributed_strategy == "fsdp" and self.device in ("cpu", "mps"):
-            raise ValueError("FSDP requires CUDA devices")
+        if self.push_to_hub and not self.hub_repo_id:
+            raise ValueError("push_to_hub=True requires hub_repo_id (e.g. 'org/model-name')")
 
     def to_training_arguments(self, *, run_name: str | None = None) -> Any:
-        """Convert to HF TrainingArguments."""
+        """Convert to HF TrainingArguments.
+
+        FSDP only makes sense with >= 2 ranks; under plain single-GPU execution
+        (no torchrun / accelerate) we skip the `fsdp=` / `fsdp_config=` block
+        because FSDP-wrapping a single rank adds overhead without sharding. For
+        distributed launches (WORLD_SIZE > 1, set by torchrun/accelerate), emit
+        the HF Trainer FSDP config so HF is the sole configurator."""
         from transformers import TrainingArguments
 
         run_name = run_name or self.make_run_name()
         output_dir = str(Path(self.output_dir) / run_name)
 
-        fsdp_value = ""
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        use_fsdp = world_size > 1
+        fsdp_value: str = ""
         fsdp_config: dict[str, Any] | None = None
         use_gradient_checkpointing = self.gradient_checkpointing
-        if self.distributed_strategy == "fsdp":
+        if use_fsdp:
             fsdp_value = f"{self.fsdp_sharding_strategy} auto_wrap"
-            if self.fsdp_cpu_offload:
-                fsdp_value += " offload"
             fsdp_config = {
                 "auto_wrap_policy": "TRANSFORMER_BASED_WRAP",
                 "backward_prefetch": "backward_pre",
@@ -153,12 +160,10 @@ class TrainerConfig:
                 "cpu_ram_efficient_loading": True,
                 "use_orig_params": True,
             }
-            # FSDP activation checkpointing, not HF Trainer's, so shapes stay consistent on recompute.
+            # Use FSDP's activation checkpointing (shape-consistent under recompute).
             if self.gradient_checkpointing:
                 fsdp_config["activation_checkpointing"] = True
                 use_gradient_checkpointing = False
-
-        do_eval = self.validation_path is not None
 
         return TrainingArguments(
             output_dir=output_dir,
@@ -172,11 +177,10 @@ class TrainerConfig:
             logging_steps=self.log_every,
             save_steps=self.save_every if self.save_every > 0 else 999_999,
             save_strategy="steps" if self.save_every > 0 else "no",
-            eval_steps=self.eval_every if do_eval else None,
-            eval_strategy="steps" if do_eval else "no",
             seed=self.seed,
             bf16=(self.dtype == "bfloat16"),
             fp16=(self.dtype == "float16"),
+            optim=self.optim,
             gradient_checkpointing=use_gradient_checkpointing,
             fsdp=fsdp_value,
             fsdp_config=fsdp_config,
@@ -187,7 +191,7 @@ class TrainerConfig:
             logging_first_step=True,
             report_to="none",
             lr_scheduler_type="linear",
-            save_total_limit=2,
+            save_total_limit=self.save_total_limit,
             load_best_model_at_end=False,
             disable_tqdm=False,
         )

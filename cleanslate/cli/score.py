@@ -21,6 +21,8 @@ def score_cmd(
         forget_set_path=forget_set_path,
         pre_eval_path=pre_eval_path,
         post_eval_path=post_eval_path,
+        pre_validation_path=pre_validation_path,
+        post_validation_path=post_validation_path,
     )
     out = save_score(result, output_path)
 
@@ -51,23 +53,17 @@ def score_cmd(
     console.print(f"  Forget score:   [green]{result.forget_score:.4f}[/green]")
     console.print(f"  Retain penalty: [yellow]{result.retain_penalty:.4f}[/yellow]")
 
-    if pre_validation_path and post_validation_path:
-        from cleanslate.validation import compare_validations, load_validation
-
-        pre_val = load_validation(pre_validation_path)
-        post_val = load_validation(post_validation_path)
-        deltas = compare_validations(pre_val, post_val)
-        if deltas:
-            console.print()
-            console.print("[bold]Validation[/bold]")
-            for d in deltas:
-                console.print(
-                    f"  {d.benchmark_name.upper():10s}  pre={d.pre_accuracy:.1%}  "
-                    f"post={d.post_accuracy:.1%}  Δ={d.delta_accuracy:+.1%}  "
-                    f"({d.relative_retention:.1%} retained)"
-                )
-            avg_retention = sum(d.relative_retention for d in deltas) / len(deltas)
-            console.print(f"  Utility retained: {avg_retention:.1%}")
+    if result.validation_deltas:
+        console.print()
+        console.print("[bold]Validation[/bold]")
+        for d in result.validation_deltas:
+            console.print(
+                f"  {d['benchmark_name'].upper():10s}  pre={d['pre_accuracy']:.1%}  "
+                f"post={d['post_accuracy']:.1%}  Δ={d['delta_accuracy']:+.1%}  "
+                f"({d['relative_retention']:.1%} retained)"
+            )
+        if result.utility_retained is not None:
+            console.print(f"  Utility retained: {result.utility_retained:.1%}")
 
     console.print()
     console.print(f"[bold]Saved to:[/bold] {out}")

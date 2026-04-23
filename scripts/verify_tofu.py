@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Verify CleanSlate NPO/SimNPO against open-unlearning on TOFU.
+"""Verify CleanSlate NPO/SimNPO/GA against open-unlearning on TOFU.
 
 Loads TOFU data (forget10 + retain90), tokenizes identically to
 open-unlearning's QADataset + preprocess_chat_instance, then trains
 using CleanSlate's CleanSlateUnlearnTrainer.
+
+Note: CleanSlate's UNDIAL and RMU implementations follow the source papers
+(Dong et al.; Li et al., WMDP). Open-unlearning's reference implementations
+contain a label-wrap bug (UNDIAL) and a broadcast bug (RMU) that CleanSlate
+does not reproduce, so this script stays byte-identical to open-unlearning
+on NPO/SimNPO/GA only — UNDIAL/RMU runs are a smoke test, not a parity check.
 
 Usage:
 
@@ -412,7 +418,7 @@ def main() -> None:
     logger.info("Loading model: %s", args.model)
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
@@ -480,7 +486,7 @@ def main() -> None:
         logger.info("Creating frozen reference model for %s", args.objective.upper())
         ref_model = AutoModelForCausalLM.from_pretrained(
             args.model,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             trust_remote_code=True,
             attn_implementation="flash_attention_2",

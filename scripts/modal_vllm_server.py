@@ -33,9 +33,9 @@ vllm_image = (
     .entrypoint([])
     .apt_install("git")
     .uv_pip_install(
-        "vllm==0.19.0",
+        "vllm==0.19.1",
         "torch==2.10.0",
-        "transformers==4.57.6",
+        "transformers==5.6.0",
         "hf-transfer==0.1.9",
     )
     .env({

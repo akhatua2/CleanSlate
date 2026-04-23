@@ -281,16 +281,18 @@ def search_bm25_one_item(content_id: str, title: str, text: str, cfg: Cfg) -> li
     if not shard_dirs:
         raise FileNotFoundError(f"No BM25 shards at {idx_dir}")
 
-    # For items longer than WINDOW_TRIGGER, split the query into overlapping windows.
-    # bm25s batches the windows in a single retrieve() call per shard.
-    WINDOW_TRIGGER = 1_125_000
-    WINDOW_CHARS = 200_000
-    WINDOW_OVERLAP = 5_000
-    if len(text) > WINDOW_TRIGGER:
-        step = WINDOW_CHARS - WINDOW_OVERLAP
-        queries = [text[i : i + WINDOW_CHARS] for i in range(0, len(text), step)]
+    SAMPLE_TRIGGER = 1_125_000
+    SAMPLE_COUNT = 20
+    SAMPLE_CHARS = 1000
+    if len(text) > SAMPLE_TRIGGER:
+        import random
+        rng = random.Random(content_id)  # deterministic per item
+        max_start = len(text) - SAMPLE_CHARS
+        starts = [rng.randint(0, max_start) for _ in range(SAMPLE_COUNT)]
+        queries = [text[s : s + SAMPLE_CHARS] for s in starts]
     else:
         queries = [text]
+
     tokens = tokenize_texts(queries)
     heap: list[tuple[float, int, dict]] = []
     seq = 0

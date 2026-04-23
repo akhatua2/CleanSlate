@@ -169,6 +169,45 @@ def _deduplicate_candidates(records: list[dict[str, Any]]) -> list[dict[str, Any
     return list(by_key.values())
 
 
+def _backfill_lyrics_from_source(
+    records: list[dict[str, Any]],
+    *,
+    source_dataset: str | None,
+    source_text_col: str,
+    source_config: str,
+) -> None:
+    """In-place: fill empty `lyrics` on eligible rows by joining against an HF source dataset."""
+    needs_backfill = [r for r in records if not r["lyrics"]]
+    if not needs_backfill:
+        return
+    if source_dataset is None:
+        raise ValueError(
+            f"{len(needs_backfill)}/{len(records)} eligible rows have empty `{source_text_col}`; "
+            "pass --source-dataset to backfill from the source HF dataset."
+        )
+
+    needed_ids = {str(r["content_id"]) for r in needs_backfill}
+    src = load_dataset(source_dataset, source_config, split="train")
+    id_to_text: dict[str, str] = {}
+    for row in src:
+        cid = str(row.get("content_id", ""))
+        if cid in needed_ids:
+            id_to_text[cid] = str(row.get(source_text_col, "") or "")
+
+    missing = needed_ids - id_to_text.keys()
+    if missing:
+        preview = list(missing)[:5]
+        print(
+            f"WARN: {len(missing)}/{len(needed_ids)} content_ids not found in "
+            f"{source_dataset} (first 5: {preview})"
+        )
+
+    for row in needs_backfill:
+        text = id_to_text.get(str(row["content_id"]))
+        if text:
+            row["lyrics"] = text
+
+
 def build_candidate_pool(
     eval_dataset: str,
     *,
@@ -180,6 +219,9 @@ def build_candidate_pool(
     num_bins: int = 5,
     seed: int = 42,
     deduplicate: bool = True,
+    source_dataset: str | None = None,
+    source_text_col: str = "reference_target",
+    source_config: str = "default",
 ) -> tuple[list[dict[str, Any]], PoolStats]:
     """Build a stratified candidate pool from an eval dataset."""
     if min_size < 1:
@@ -206,7 +248,7 @@ def build_candidate_pool(
                 "content_title": row.get("content_title", ""),
                 "content_creators": _to_artists(row.get("content_creators")),
                 "content_year": row.get("content_year"),
-                "lyrics": row.get("reference_target", ""),
+                "lyrics": row.get(source_text_col, "") or "",
                 "memorized_fraction": mem_fraction,
                 "max_p_z": row.get("max_p_z"),
                 "num_windows": row.get("num_windows"),
@@ -214,6 +256,13 @@ def build_candidate_pool(
                 "source_dataset": eval_dataset,
             }
         )
+
+    _backfill_lyrics_from_source(
+        eligible,
+        source_dataset=source_dataset,
+        source_text_col=source_text_col,
+        source_config=source_config,
+    )
 
     if deduplicate:
         eligible = _deduplicate_candidates(eligible)
