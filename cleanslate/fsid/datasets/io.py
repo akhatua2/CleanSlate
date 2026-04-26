@@ -9,7 +9,7 @@ from datasets import load_dataset  # type: ignore[import-untyped]
 
 
 def _looks_like_hf_id(path_str: str) -> bool:
-    """True if path_str looks like org/name[:config] rather than a local path."""
+    """True if path_str looks like org/name[:config[:split]] rather than a local path."""
     if path_str.startswith((".", "/", "~")):
         return False
     base = path_str.split(":")[0]
@@ -20,12 +20,24 @@ def _looks_like_hf_id(path_str: str) -> bool:
 
 
 def _load_hf_records(path_str: str) -> list[dict[str, Any]]:
-    """Load records from a HuggingFace dataset ID (accepts ``repo_id`` or ``repo_id:config``)."""
-    if ":" in path_str:
-        repo_id, config_name = path_str.rsplit(":", 1)
-    else:
-        repo_id, config_name = path_str, None
-    ds = load_dataset(repo_id, config_name, split="train")
+    """Load records from a HuggingFace dataset ID.
+
+    Accepts ``repo_id``, ``repo_id:config``, or ``repo_id:config:split``.
+    Single- and two-segment forms default ``split="train"``.
+    """
+    parts = path_str.split(":")
+    match parts:
+        case [repo_id]:
+            config_name, split = None, "train"
+        case [repo_id, config_name]:
+            split = "train"
+        case [repo_id, config_name, split]:
+            pass
+        case _:
+            raise ValueError(
+                f"Expected repo_id[:config[:split]], got {path_str!r}"
+            )
+    ds = load_dataset(repo_id, config_name, split=split)
     return list(ds)
 
 
@@ -33,7 +45,8 @@ def load_local_records(path: str | Path) -> list[dict[str, Any]]:
     """Load records from a local file or HuggingFace dataset ID.
 
     Supported local formats: parquet, json, jsonl.
-    HuggingFace IDs: ``org/dataset`` or ``org/dataset:config``.
+    HuggingFace IDs: ``org/dataset``, ``org/dataset:config``, or
+    ``org/dataset:config:split``.
     """
     path_str = str(path)
     if _looks_like_hf_id(path_str):
