@@ -213,8 +213,7 @@ def main() -> None:
         "params": {
             "min_n": args.min_n, "min_count": args.min_count,
             "n_values": args.n_values, "top_k_spans": args.top_k_spans,
-            "docs_per_span": args.docs_per_span,
-            "workers": args.workers, "compute_workers": args.compute_workers,
+            "docs_per_span": args.docs_per_span, "workers": args.workers,
             "song_workers": args.song_workers, "load_to_ram": args.load_to_ram,
             "index_dir": str(args.index_dir),
             "olmo_dataset": args.olmo_dataset, "olmo_config": args.olmo_config,
