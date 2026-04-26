@@ -82,7 +82,6 @@ def build_cmd(
         "--top-k-spans", str(args.top_k_spans),
         "--docs-per-span", str(args.docs_per_span),
         "--workers", str(args.workers),
-        "--compute-workers", str(args.compute_workers),
     ]
     if payload.get("song_title"):
         cmd += ["--song-title", payload["song_title"]]
@@ -141,9 +140,7 @@ def main() -> None:
     ap.add_argument("--top-k-spans", type=int, default=20000)
     ap.add_argument("--docs-per-span", type=int, default=25)
     ap.add_argument("--workers", type=int, default=8,
-                    help="threads per subprocess for parallel retrieve_docs")
-    ap.add_argument("--compute-workers", type=int, default=8,
-                    help="threads per subprocess for parallel compute_matched_word_ngrams")
+                    help="threads per subprocess for compute_matched_word_ngrams + retrieve_docs")
     ap.add_argument("--song-workers", type=int, default=4,
                     help="number of concurrent subprocesses (each runs igm_one.py)")
     ap.add_argument("--load-to-ram", action="store_true",
