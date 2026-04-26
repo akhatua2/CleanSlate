@@ -23,8 +23,11 @@ def load_engine(index_dir: Path, load_to_ram: bool = False):
     if engine_str not in sys.path:
         sys.path.insert(0, engine_str)
     from src.engine import InfiniGramMiniEngine  # type: ignore[import-untyped]
-    # Multi-shard layout: index_dir/shard_NNN/data.fm9. Single-shard: index_dir/data.fm9.
+    # Multi-shard layouts: index_dir/shard_NNN/data.fm9 (our build) or
+    # index_dir/NN/data.fm9 (upstream IGM preindexed). Single-shard: index_dir/data.fm9.
     shard_dirs = sorted(index_dir.glob("shard_*"))
+    if not shard_dirs:
+        shard_dirs = sorted(d for d in index_dir.iterdir() if d.is_dir() and d.name.isdigit())
     dirs = [str(d) for d in shard_dirs if (d / "data.fm9").exists()]
     if not dirs:
         dirs = [str(index_dir)]
@@ -115,19 +118,26 @@ def _build_shard_worker(args: tuple[str, list[str], str, int]) -> int:
     return shard_idx
 
 
-def build_fm_index(cfg: Cfg) -> None:
+def build_fm_index(cfg: Cfg, shard_range: tuple[int, int] | None = None) -> None:
     """Build FM-index from raw Dolma shards. Sharded: splits corpus into
     cfg.num_index_shards independent FM-indexes, optionally built in parallel
     (cfg.fm_parallel). Intermediates are deleted per-shard as they complete.
-    Idempotent per-shard."""
+    Idempotent per-shard.
+
+    shard_range: optional (lo, hi) half-open slice to restrict which shards this
+    process builds. Enables distributed builds where each machine handles a
+    disjoint range. Only valid when num_index_shards > 1."""
     idx = cfg.index_dir
     n = max(1, cfg.num_index_shards)
+
+    if shard_range is not None and n == 1:
+        raise ValueError("shard_range requires num_index_shards > 1")
 
     # Check if all shards already built
     if n == 1 and (idx / "data.fm9").exists():
         print(f"FM-index exists at {idx}, skipping.")
         return
-    if n > 1 and all((idx / f"shard_{i:03d}" / "data.fm9").exists() for i in range(n)):
+    if shard_range is None and n > 1 and all((idx / f"shard_{i:03d}" / "data.fm9").exists() for i in range(n)):
         print(f"All {n} FM-index shards exist at {idx}, skipping.")
         return
 
@@ -146,8 +156,13 @@ def build_fm_index(cfg: Cfg) -> None:
 
     # Round-robin raw shards into N groups so each group has similar size
     groups = [all_shards[i::n] for i in range(n)]
+    lo, hi = (shard_range if shard_range is not None else (0, n))
+    if not (0 <= lo < hi <= n):
+        raise ValueError(f"shard_range {shard_range} out of bounds for n={n}")
     pending: list[tuple[int, list[Path], Path]] = []
     for shard_idx, group in enumerate(groups):
+        if not (lo <= shard_idx < hi):
+            continue
         shard_dir = idx / f"shard_{shard_idx:03d}"
         if (shard_dir / "data.fm9").exists():
             print(f"  shard {shard_idx}/{n} already built, skipping")

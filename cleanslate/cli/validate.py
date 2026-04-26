@@ -73,7 +73,7 @@ def _push_generations(
 
 def generate_cmd(
     model: str = typer.Option(..., "-m", "--model", help="HF model name or alias"),
-    tasks: str = typer.Option(TASK_PRESETS["full"], "-B", "--benchmarks", help="Comma-separated lm-eval tasks. Presets: 'full' (12-benchmark retention suite). Mixable: `full,mmlu_pro`."),
+    tasks: str = typer.Option("full", "-B", "--benchmarks", help="Comma-separated lm-eval tasks. Presets: 'full' (12-benchmark retention suite). Mixable: `full,mmlu_pro`."),
     num_fewshot: int | None = typer.Option(None, "--num-fewshot"),
     batch_size: str = typer.Option("auto", "--batch-size"),
     gpu_memory_utilization: float = typer.Option(0.90, "--gpu-mem"),
@@ -151,7 +151,7 @@ def judge_cmd(
 
 def validate_cmd(
     model: str = typer.Option(..., "-m", "--model", help="HF model name or alias"),
-    tasks: str = typer.Option(TASK_PRESETS["full"], "-B", "--benchmarks", help="Comma-separated lm-eval tasks. Presets: 'full'. Mixable: `full,mmlu_pro`."),
+    tasks: str = typer.Option("full", "-B", "--benchmarks", help="Comma-separated lm-eval tasks. Presets: 'full'. Mixable: `full,mmlu_pro`."),
     num_fewshot: int | None = typer.Option(None, "--num-fewshot"),
     batch_size: str = typer.Option("auto", "--batch-size"),
     gpu_memory_utilization: float = typer.Option(0.90, "--gpu-mem"),

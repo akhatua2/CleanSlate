@@ -1,0 +1,26 @@
+model_name: null
+forget_path: null
+objective: undial
+undial_beta: 10.0         # teacher-logit temperature; higher = gentler forgetting
+retain_path: null
+retain_loss_type: nll
+forget_weight: 1.0
+retain_weight: 1.0
+num_epochs: 2
+batch_size: 8
+gradient_accum_steps: 4
+lr: 1.0e-5
+weight_decay: 0.0
+warmup_steps: 20
+max_grad_norm: 1.0
+output_dir: runs
+save_every: 200
+save_total_limit: 20
+log_every: 10
+dtype: bfloat16
+optim: paged_adamw_8bit
+fsdp_sharding_strategy: full_shard
+seed: 42
+num_workers: 0
+gradient_checkpointing: false
+torch_compile: false

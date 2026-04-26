@@ -2,7 +2,6 @@
 
 from typing import Any
 
-import torch
 from torch.utils.data import Dataset as TorchDataset
 
 
@@ -92,20 +91,3 @@ def tokenize_text_rows(rows: list[dict[str, Any]], tokenizer: Any) -> list[dict[
     return out
 
 
-def collate_text_sequences(
-    batch: list[dict[str, Any]],
-    pad_id: int,
-) -> dict[str, torch.Tensor]:
-    """Right-pad retain/validation LM examples."""
-    max_len = max(len(row["input_ids"]) for row in batch)
-    bsz = len(batch)
-    input_ids = torch.full((bsz, max_len), pad_id, dtype=torch.long)
-    attention_mask = torch.zeros((bsz, max_len), dtype=torch.long)
-    labels = torch.full((bsz, max_len), -100, dtype=torch.long)
-    for i, row in enumerate(batch):
-        ids = row["input_ids"]
-        seq_len = len(ids)
-        input_ids[i, :seq_len] = torch.tensor(ids, dtype=torch.long)
-        attention_mask[i, :seq_len] = 1
-        labels[i, :seq_len] = torch.tensor(row["labels"], dtype=torch.long)
-    return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}

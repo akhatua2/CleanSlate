@@ -1,4 +1,4 @@
-"""Model and tokenizer setup for FSID training."""
+"""Model and tokenizer setup for FSID training (FSDP-only)."""
 
 from typing import Any
 
@@ -15,7 +15,7 @@ _DTYPE_MAP: dict[str, torch.dtype] = {
 
 
 def load_tokenizer(model_name: str, *, local_files_only: bool = False) -> Any:
-    tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call]
+    tokenizer = AutoTokenizer.from_pretrained(
         model_name, trust_remote_code=True, local_files_only=local_files_only
     )
     if tokenizer.pad_token_id is None:
@@ -34,30 +34,20 @@ def _patch_rope_scaling(model: Any) -> None:
             rope_cfg[key] = float(value)
 
 
-def load_model(
-    config: TrainerConfig,
-    *,
-    local_files_only: bool = False,
-    device_map: str | None = None,
-) -> Any:
-    """Load a causal LM for HF Trainer. Device placement is handled by Trainer/accelerate."""
-    torch_dtype = _DTYPE_MAP[config.dtype]
-    load_kwargs: dict[str, Any] = {
-        "torch_dtype": torch_dtype,
-        "low_cpu_mem_usage": True,
-        "trust_remote_code": True,
-        "local_files_only": local_files_only,
-    }
-    if device_map is not None:
-        load_kwargs["device_map"] = device_map
-
-    model = AutoModelForCausalLM.from_pretrained(config.model_name, **load_kwargs)
+def load_model(config: TrainerConfig, *, local_files_only: bool = False) -> Any:
+    """Load a causal LM for FSDP-wrapped HF Trainer. Device placement is handled by
+    Trainer/accelerate; callers must launch under torchrun/accelerate."""
+    model_dtype = _DTYPE_MAP[config.dtype]
+    model = AutoModelForCausalLM.from_pretrained(
+        config.model_name,
+        dtype=model_dtype,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+        local_files_only=local_files_only,
+    )
     _patch_rope_scaling(model)
-
     # FSDP requires uniform dtype; some models keep layer-norm/embedding in fp32
-    # despite torch_dtype — force a uniform cast before FSDP wraps.
-    if config.distributed_strategy == "fsdp":
-        model.to(torch_dtype)  # type: ignore[arg-type]
-
+    # despite the dtype kwarg — force a uniform cast before FSDP wraps.
+    model.to(model_dtype)  # type: ignore[arg-type]
     model.config.use_cache = False
     return model

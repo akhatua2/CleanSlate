@@ -52,13 +52,13 @@ cleanslate judge -i results/validation/qwen-8b -o results/validation/qwen-8b.jso
 cleanslate generate -m qwen-8b -B mmlu,cleanslate_qa -o results/validation/qwen-8b \
   --push-to-hub --push-suffix corpus_sweep_post_eval
 cleanslate validate -m qwen-8b -B mmlu,cleanslate_qa --push-to-hub \
-  --push-suffix corpus_sweep_post_eval -o results/validation/qwen-8b.json
+  --push-suffix corpus_sweep_post_eval -o results/validation/qwen-8b
 
 # Task presets: `full` expands to the 12-benchmark retention suite
 # (mmlu, triviaqa, cleanslate_qa, gsm8k, hellaswag, winogrande, drop,
 #  arc_challenge, humaneval_plus, bbh, lambada_openai, coqa). Mixable
 # with individual tasks: `-B full,mmlu_pro`.
-cleanslate validate -m qwen-8b -B full -o results/validation/qwen-8b.json \
+cleanslate validate -m qwen-8b -B full -o results/validation/qwen-8b \
   --push-to-hub --push-suffix full_suite
 
 # FSID unlearning pipeline (requires [unlearning])
@@ -181,13 +181,13 @@ Integration with lm-evaluation-harness for benchmark validation. Three CLI verbs
 Unlearning pipeline.
 
 **Config** (`fsid/config.py`):
-- `TrainerConfig` (dataclass): all training + data + distributed + logging knobs. Types: `ObjectiveType = Literal["ga", "npo", "simnpo", "rmu", "undial"]`, `DistributedStrategyType = Literal["single", "fsdp"]`, `RetainLossType = Literal["nll", "kl", "embed_diff"]`.
+- `TrainerConfig` (dataclass): all training + data + logging knobs. Training is **FSDP-only** — launch with `torchrun --nproc_per_node=N` (N=1 works). Checkpointing: `save_every` (0 = final only) and `save_total_limit` (retention cap). Types: `ObjectiveType = Literal["ga", "npo", "simnpo", "rmu", "undial"]`, `FSDPShardingStrategyType = Literal["full_shard", "shard_grad_op"]`, `RetainLossType = Literal["nll", "kl", "embed_diff"]`.
 - `load_config(yaml_path, *, cli_overrides)` — YAML + CLI merge. Raises on unknown keys and invalid values.
 
 **Data** (`fsid/datasets/`):
 - `io.py :: load_local_records(path)` — parquet / json / jsonl / HF dataset ID.
 - `pool.py :: build_candidate_pool(...)`, `split_pool_records(...)`, `save_pool_datasets(...)` — stratified memorization pool, forget/retain split, parquet writes.
-- `unlearning.py :: ForgetPairDataset`, `TextSequenceDataset`, `build_forget_pairs(...)`, `build_forget_pairs_from_windows(...)`, `tokenize_text_rows(...)`, `collate_text_sequences(...)`.
+- `unlearning.py :: ForgetPairDataset`, `TextSequenceDataset`, `build_forget_pairs(...)`, `build_forget_pairs_from_windows(...)`, `tokenize_text_rows(...)`.
 
 **Rules** (`fsid/rules/`):
 - `FORGET_SET_RULES` registry: `baseline` (direct-lyric forget rows) and `corpus_sweep` (dolma-matched windows from `unlearning-cleanslate/corpus_sweep_cleanslate_dataset`).
@@ -197,7 +197,7 @@ Unlearning pipeline.
 
 **Training** (`fsid/training/`):
 - `modeling.py :: load_tokenizer(model_name)`, `load_model(config, *, device_map)` — HF `AutoModelForCausalLM` + rope_scaling patch + FSDP-uniform dtype.
-- `losses.py`: `compute_batch_nll`, `compute_npo_loss`, `compute_simnpo_loss`, `compute_undial_loss`, `compute_rmu_forget_loss`, `compute_activation_mse`, `compute_embed_diff_retain_loss`, `compute_kl_retain_loss`, `forward_with_cache`. UNDIAL and RMU replicate open-unlearning bugs for byte-parity with `scripts/verify_tofu.py`; see per-function docstrings.
+- `losses.py`: `compute_batch_nll`, `compute_npo_loss`, `compute_simnpo_loss`, `compute_undial_loss`, `compute_rmu_forget_loss`, `compute_activation_mse`, `compute_embed_diff_retain_loss`, `compute_kl_retain_loss`, `forward_with_cache`.  
 - `data.py :: ForgetRetainDataset` (anchored pair dataset), `UnlearnDataCollator` (nested forget/retain collator).
 - `trainer.py :: CleanSlateUnlearnTrainer` (extends HF `Trainer`, dispatches by objective), `train_unlearning(config)` entry point.
 

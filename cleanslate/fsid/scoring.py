@@ -197,8 +197,15 @@ def compute_score(
     forget_set_path: str | Path,
     pre_eval_path: str | Path,
     post_eval_path: str | Path,
+    pre_validation_path: str | Path | None = None,
+    post_validation_path: str | Path | None = None,
 ) -> UnlearningScore:
-    """Compute a benchmark score from local pre/post eval artifacts."""
+    """Compute a benchmark score from local pre/post eval artifacts.
+
+    If pre/post validation JSONs are supplied, their `ValidationDelta`s are
+    serialized onto the result so the single score.json carries both forget
+    and retention numbers (what the paper's table row consumes).
+    """
     forget_ids = _extract_forget_ids(load_local_records(forget_set_path))
     pre_by_id = _index_unique_by_content_id(load_local_records(pre_eval_path), label="pre-eval")
     post_by_id = _index_unique_by_content_id(load_local_records(post_eval_path), label="post-eval")
@@ -308,6 +315,20 @@ def compute_score(
         window_agg["retain_windows_regressed"] = r_reg
         window_agg["retain_window_stability"] = 1.0 - (r_reg / r_total) if r_total > 0 else 1.0
 
+    validation_kwargs: dict[str, Any] = {}
+    if pre_validation_path is not None and post_validation_path is not None:
+        from cleanslate.validation import compare_validations, load_validation
+
+        deltas_val = compare_validations(
+            load_validation(pre_validation_path),
+            load_validation(post_validation_path),
+        )
+        if deltas_val:
+            validation_kwargs["validation_deltas"] = [asdict(d) for d in deltas_val]
+            validation_kwargs["utility_retained"] = sum(
+                d.relative_retention for d in deltas_val
+            ) / len(deltas_val)
+
     return UnlearningScore(
         forget_count=len(forget_deltas),
         forget_mean_delta_frac=_mean([d.delta_memorized_fraction for d in forget_deltas]),
@@ -321,6 +342,7 @@ def compute_score(
         per_content=deltas,
         **ppl_agg,
         **window_agg,
+        **validation_kwargs,
     )
 
 
