@@ -370,6 +370,9 @@ eval = [
     { name = "python-dotenv" },
     { name = "ray" },
 ]
+modal = [
+    { name = "modal" },
+]
 unlearning = [
     { name = "accelerate" },
 ]
@@ -385,6 +388,7 @@ requires-dist = [
     { name = "lm-eval", extras = ["api"], marker = "extra == 'eval'", specifier = "==0.4.11" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "modal", marker = "extra == 'eval'", specifier = "==1.4.2" },
+    { name = "modal", marker = "extra == 'modal'", specifier = ">=1.4.2" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numpy", marker = "extra == 'curation'" },
     { name = "polars", marker = "extra == 'curation'" },
@@ -402,7 +406,7 @@ requires-dist = [
     { name = "vllm", specifier = "==0.19.1" },
     { name = "zstandard", marker = "extra == 'curation'" },
 ]
-provides-extras = ["eval", "dev", "curation", "unlearning"]
+provides-extras = ["eval", "dev", "curation", "unlearning", "modal"]
 
 [[package]]
 name = "click"

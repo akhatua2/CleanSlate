@@ -32,6 +32,34 @@ from cleanslate.fsid.rules import (
     save_curated_sets,
 )
 
+DEFAULT_HF_ORG = "unlearning-cleanslate"
+
+
+def _normalize_segment(s: str) -> str:
+    """Normalize a repo-id segment to lowercase-dashes (HF convention)."""
+    return s.replace("_", "-").lower()
+
+
+def _derive_hub_repo_id(
+    *,
+    hf_org: str,
+    model: str,
+    config_path: str | None,
+    forget_path: str | None,
+    objective: str | None,
+) -> str:
+    """Auto-derive hub_repo_id as ``<org>/<model_clean>-<variant>-<rule>``."""
+    _, model_clean = resolve_model(model)
+    variant_raw = Path(config_path).stem if config_path else (objective or "unlearned")
+    variant = _normalize_segment(variant_raw)
+
+    rule = "custom"
+    if forget_path:
+        parts = forget_path.split(":")
+        if len(parts) == 3 and not Path(parts[0]).exists():
+            rule = _normalize_segment(parts[2])
+    return f"{hf_org}/{model_clean}-{variant}-{rule}"
+
 fsid_app = typer.Typer(
     name="fsid",
     help="Forget-Set IDentification: build pools, curate, and train.",
@@ -236,13 +264,35 @@ def train(
     ),
     hub_repo_id: str | None = typer.Option(
         None, "--hub-repo-id",
-        help="Target HF repo id, e.g. 'unlearning-cleanslate/qwen3-8b-unlearned-baseline-simnpo'.",
+        help="Target HF repo id. If omitted with --push-to-hub, auto-derived as <hf-org>/<model_clean>-<config_stem>-<rule>.",
+    ),
+    hf_org: str = typer.Option(
+        DEFAULT_HF_ORG, "--hf-org",
+        help="Org used when auto-deriving --hub-repo-id.",
+    ),
+    modal_remote: bool = typer.Option(
+        False, "--modal",
+        help="Run remotely on Modal instead of locally. Streams logs back; checkpoints land on the 'training-runs' Modal volume (and HF if --push-to-hub).",
+    ),
+    modal_gpu: str = typer.Option(
+        "B200", "--modal-gpu",
+        help="Modal GPU spec, e.g. 'B200', 'H200', 'H100:8', 'A100-80GB:4'. Only used with --modal.",
     ),
 ) -> None:
     """Train an unlearned model from a YAML config (+ CLI overrides)."""
-    from cleanslate.fsid.training.trainer import train_unlearning
-
     model_path = resolve_model(model)[0] if model else None
+
+    if push_to_hub and hub_repo_id is None:
+        if model is None:
+            raise typer.BadParameter("--model is required to auto-derive --hub-repo-id")
+        hub_repo_id = _derive_hub_repo_id(
+            hf_org=hf_org,
+            model=model,
+            config_path=config_path,
+            forget_path=forget_path,
+            objective=objective,
+        )
+        console.print(f"[bold]Auto hub_repo_id:[/bold] {hub_repo_id}")
     cli_overrides: dict[str, Any] = {
         "model_name": model_path,
         "forget_path": forget_path,
@@ -284,7 +334,12 @@ def train(
         config = TrainerConfig(**kwargs)
         config.validate()
 
-    summary = train_unlearning(config)
+    if modal_remote:
+        from cleanslate.modal.train import run_remote
+        summary = run_remote(config, gpu=modal_gpu)
+    else:
+        from cleanslate.fsid.training.trainer import train_unlearning
+        summary = train_unlearning(config)
     if not summary.get("is_main_process", True):
         return
     console.print(f"[bold]Checkpoint:[/bold] {summary['checkpoint_dir']}")

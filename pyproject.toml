@@ -34,6 +34,7 @@ curation = [
     "numpy",
 ]
 unlearning = ["accelerate>=0.34"]
+modal = ["modal>=1.4.2"]
 
 [project.scripts]
 cleanslate = "cleanslate.cli:main"
