@@ -250,10 +250,6 @@ def train(
         None, "--save-every",
         help="Save a checkpoint every N steps during unlearning (0 = final only).",
     ),
-    save_total_limit: int | None = typer.Option(
-        None, "--save-total-limit",
-        help="Max number of intermediate checkpoints to retain (default 2).",
-    ),
     gradient_checkpointing: bool | None = typer.Option(
         None, "--gradient-checkpointing/--no-gradient-checkpointing"
     ),
@@ -317,7 +313,6 @@ def train(
         "seed": seed,
         "log_every": log_every,
         "save_every": save_every,
-        "save_total_limit": save_total_limit,
         "gradient_checkpointing": gradient_checkpointing,
         "torch_compile": torch_compile,
         "push_to_hub": push_to_hub,

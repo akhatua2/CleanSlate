@@ -57,8 +57,9 @@ class TrainerConfig:
 
     # Checkpointing. save_every=0 disables intermediate checkpoints; the final
     # trained model is always saved via trainer.save_model() at end-of-run.
+    # save_total_limit is intentionally absent — keep every intermediate so the
+    # full unlearning trajectory is published to HF when push_to_hub is on.
     save_every: int = 0
-    save_total_limit: int = 2
 
     fsdp_sharding_strategy: FSDPShardingStrategyType = "full_shard"
 
@@ -106,7 +107,6 @@ class TrainerConfig:
             "batch_size": self.batch_size,
             "gradient_accum_steps": self.gradient_accum_steps,
             "log_every": self.log_every,
-            "save_total_limit": self.save_total_limit,
         }
         for pos_name, pos_value in positive_ints.items():
             if pos_value < 1:
@@ -191,7 +191,6 @@ class TrainerConfig:
             logging_first_step=True,
             report_to="none",
             lr_scheduler_type="linear",
-            save_total_limit=self.save_total_limit,
             load_best_model_at_end=False,
             disable_tqdm=False,
         )
