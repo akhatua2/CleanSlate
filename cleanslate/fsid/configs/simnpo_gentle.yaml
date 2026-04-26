@@ -15,7 +15,7 @@ weight_decay: 0.0
 warmup_steps: 10
 max_grad_norm: 1.0
 output_dir: runs
-save_every: 100
+save_every: 200
 log_every: 10
 dtype: bfloat16
 fsdp_sharding_strategy: full_shard
