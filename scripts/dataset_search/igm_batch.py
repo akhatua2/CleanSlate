@@ -39,17 +39,31 @@ def _cell(row: dict, col: str) -> str | None:
     return v if v not in (None, "") else None
 
 
-def write_payload_files(
-    *, output_dir: Path, song_ids: list[str],
+def select_and_write_payloads(
+    *, output_dir: Path,
+    song_ids: list[str] | None,
+    memfraction_threshold: float | None,
     olmo_dataset: str, olmo_config: str,
-) -> tuple[dict[str, dict], list[str]]:
-    """Load olmo, write per-song reference text + meta to disk for the workers."""
+) -> tuple[list[str], dict[str, dict], list[str]]:
+    """Pick song_ids (explicit list or memorized_fraction filter), then write
+    per-song reference text + meta to disk for the workers.
+
+    Returns (song_ids_used, payloads, missing). Caller guarantees exactly one of
+    song_ids / memfraction_threshold is set.
+    """
     from datasets import load_dataset
     df = load_dataset(olmo_dataset, olmo_config)["train"].to_polars()
 
+    if memfraction_threshold is not None:
+        sel = df.filter(pl.col("memorized_fraction") >= memfraction_threshold)
+        song_ids_used = sel["song_id"].to_list()
+    else:
+        song_ids_used = song_ids or []
+        sel = df.filter(pl.col("song_id").is_in(song_ids_used))
+
     payloads: dict[str, dict] = {}
     found: set[str] = set()
-    for row in df.filter(pl.col("song_id").is_in(song_ids)).iter_rows(named=True):
+    for row in sel.iter_rows(named=True):
         sid = row["song_id"]
         found.add(sid)
         song_dir = output_dir / "songs" / sid
@@ -63,8 +77,8 @@ def write_payload_files(
             "content_creators": _cell(row, "content_creators"),
             "content_year": _cell(row, "content_year"),
         }
-    missing = [sid for sid in song_ids if sid not in found]
-    return payloads, missing
+    missing = [sid for sid in song_ids_used if sid not in found]
+    return song_ids_used, payloads, missing
 
 
 def build_cmd(
@@ -126,8 +140,12 @@ def run_one(cmd: list[str], log_path: Path, summary_path: Path) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--song-ids", type=Path, required=True,
-                    help="json list or newline-delimited text of song_ids")
+    ap.add_argument("--song-ids", type=Path, default=None,
+                    help="json list or newline-delimited text of song_ids "
+                         "(mutually exclusive with --memfraction-threshold)")
+    ap.add_argument("--memfraction-threshold", type=float, default=None,
+                    help="select all olmo song_ids with memorized_fraction >= this "
+                         "(mutually exclusive with --song-ids; suggested value 0.05)")
     ap.add_argument("--index-dir", type=Path,
                     default=Path("curation/indices/10B/infini_gram_mini/b6c7e0c77ec6"))
     ap.add_argument("--olmo-dataset", type=str,
@@ -151,17 +169,28 @@ def main() -> None:
                     help="keep songs/<id>/_input.txt after subprocess succeeds (default: delete)")
     args = ap.parse_args()
 
-    song_ids = parse_song_ids(args.song_ids)
-    if not song_ids:
-        raise SystemExit(f"no song ids in {args.song_ids}")
+    if (args.song_ids is None) == (args.memfraction_threshold is None):
+        raise SystemExit(
+            "must pass exactly one of --song-ids / --memfraction-threshold"
+        )
+
+    explicit_ids: list[str] | None = None
+    if args.song_ids is not None:
+        explicit_ids = parse_song_ids(args.song_ids)
+        if not explicit_ids:
+            raise SystemExit(f"no song ids in {args.song_ids}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     started_at = time.time()
 
-    payloads, missing = write_payload_files(
-        output_dir=args.output_dir, song_ids=song_ids,
+    song_ids, payloads, missing = select_and_write_payloads(
+        output_dir=args.output_dir,
+        song_ids=explicit_ids,
+        memfraction_threshold=args.memfraction_threshold,
         olmo_dataset=args.olmo_dataset, olmo_config=args.olmo_config,
     )
+    if not song_ids:
+        raise SystemExit("no song_ids selected (check --song-ids / --memfraction-threshold)")
 
     n_workers = min(args.song_workers, max(1, len(payloads)))
     log_dir = args.output_dir / "_logs"
@@ -217,6 +246,7 @@ def main() -> None:
             "song_workers": args.song_workers, "load_to_ram": args.load_to_ram,
             "index_dir": str(args.index_dir),
             "olmo_dataset": args.olmo_dataset, "olmo_config": args.olmo_config,
+            "memfraction_threshold": args.memfraction_threshold,
         },
     }
     (args.output_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2))
