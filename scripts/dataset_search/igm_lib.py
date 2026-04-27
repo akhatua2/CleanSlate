@@ -18,6 +18,23 @@ from curation.retrieval.backend_infini_gram import retrieve_docs as _curation_re
 from curation.retrieval.schema import Span
 
 WORD_RE = re.compile(r"\S+")
+_SLUG_NONALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def config_name_for_song(
+    title: str | None, song_id: str, *, max_title_chars: int = 70, uid_chars: int = 8,
+) -> str:
+    """HF-safe, collision-free config name: <title-slug>__<song_id[:uid_chars]>.
+
+    Slug rule: lowercase, non-alphanumerics → '_', collapse repeats, strip
+    leading/trailing '_', truncate to `max_title_chars`. The trailing
+    `__<song_id[:uid_chars]>` guarantees uniqueness even when titles collide
+    or slugify to empty (covers / re-issues / non-latin titles).
+    """
+    raw = (title or "").strip().lower()
+    slug = _SLUG_NONALNUM.sub("_", raw).strip("_")[:max_title_chars].rstrip("_")
+    suffix = song_id[:uid_chars]
+    return f"{slug}__{suffix}" if slug else f"song__{suffix}"
 
 
 @dataclass
