@@ -122,6 +122,25 @@ def run_memorization_eval(params: dict[str, Any]) -> None:
             "best_window_start_char": best.window_start_char,
             "best_window_end_char": best.window_end_char,
             "eval_model": model_path,
+            "window_size": sw.prefix_len + sw.suffix_len,
+            "stride": sw.stride,
+            "eval_threshold": sw.tau_min,
+            "windows": [
+                {
+                    "idx": w.window_idx,
+                    "start_char": w.window_start_char,
+                    "end_char": w.window_end_char,
+                    "seed": w.seed,
+                    "target": w.target,
+                    "p_z": w.p_z,
+                    "log_prob": w.log_prob,
+                    "is_memorized": w.is_memorized,
+                    "num_target_tokens": w.num_target_tokens,
+                    "target_log_probs": w.target_log_probs,
+                    "target_ranks": w.target_ranks,
+                }
+                for w in sw.windows
+            ],
         }
         for col in METADATA_COLUMNS:
             if col in item:
