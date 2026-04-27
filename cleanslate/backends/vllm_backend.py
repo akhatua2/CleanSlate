@@ -126,6 +126,17 @@ class VLLMBackend(InferenceBackend):
         self._dp_size = cfg.get("data_parallel", 1)
         tp_size = cfg.get("num_gpus", 1)
 
+        gpu_ids = cfg.get("gpu_ids")
+        if gpu_ids is not None:
+            expected = self._dp_size * tp_size
+            if len(gpu_ids) != expected:
+                raise ValueError(
+                    f"gpu_ids has {len(gpu_ids)} entries but data_parallel*num_gpus = {expected}"
+                )
+            self._gpu_ids: list[int] = [int(g) for g in gpu_ids]
+        else:
+            self._gpu_ids = list(range(self._dp_size * tp_size))
+
         if self._dp_size > 1:
             self._init_dp(model_name, cfg, tp_size)
         else:
@@ -135,6 +146,9 @@ class VLLMBackend(InferenceBackend):
 
     def _init_single(self, model_name: str, cfg: dict[str, Any]) -> None:
         from vllm import LLM
+
+        if cfg.get("gpu_ids") is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in self._gpu_ids)
 
         logger.info("Loading %s with vLLM...", model_name)
         llm_kwargs: dict[str, Any] = dict(
@@ -176,7 +190,7 @@ class VLLMBackend(InferenceBackend):
         self._workers = []
 
         for rank in range(self._dp_size):
-            gpu_ids = list(range(rank * tp_size, (rank + 1) * tp_size))
+            gpu_ids = self._gpu_ids[rank * tp_size : (rank + 1) * tp_size]
             tq: mp.Queue[list[tuple[str, str]] | None] = ctx.Queue()
             rq: mp.Queue[list[ProbabilityResult]] = ctx.Queue()
             p = ctx.Process(
