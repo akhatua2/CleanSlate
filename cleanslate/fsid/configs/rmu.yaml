@@ -19,7 +19,6 @@ output_dir: runs
 save_every: 200
 log_every: 10
 dtype: bfloat16
-optim: paged_adamw_8bit
 fsdp_sharding_strategy: full_shard
 seed: 42
 num_workers: 0
