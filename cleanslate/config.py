@@ -22,7 +22,11 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     },
     "vllm": {
         "num_gpus": 1,
-        "data_parallel": 2,
+        # data_parallel=1 in the baked-in fallback so the eval-on-Modal
+        # single-GPU container doesn't spawn DP workers waiting for a second
+        # GPU that isn't there. Local users override via project-root
+        # config.yaml when they actually have multiple GPUs.
+        "data_parallel": 1,
         "gpu_memory_utilization": 0.95,
         "max_model_len": 512,
         "dtype": "bfloat16",

@@ -117,5 +117,5 @@ def is_correct(reference: str, model_answer: str, *, max_retries: int = 5) -> bo
     """Judge if answer is correct. Routes to remote vLLM completion if
     JUDGE_BASE_URL is set, otherwise Gemini via LiteLLM (with retries)."""
     if os.environ.get("JUDGE_BASE_URL"):
-        return _remote_judge(reference, model_answer)
+        return _remote_judge(reference, model_answer, max_retries=max_retries)
     return _gemini_judge(reference, model_answer, max_retries=max_retries)
