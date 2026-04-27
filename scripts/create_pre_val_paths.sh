@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 source .venv/bin/activate
+ulimit -n 1048576
 
 mkdir -p logs
 
