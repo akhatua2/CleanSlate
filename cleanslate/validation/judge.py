@@ -61,21 +61,31 @@ _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
 )
 
 
-def _remote_judge(reference: str, model_answer: str) -> bool:
+def _remote_judge(reference: str, model_answer: str, *, max_retries: int) -> bool:
+    """Remote completion-endpoint judge with exponential-backoff retry on
+    transient errors; raises loudly on exhaustion (no silent `return False`).
+    Mirrors the behaviour of `_gemini_judge`."""
     base_url = os.environ["JUDGE_BASE_URL"]
     model = os.environ["JUDGE_MODEL"]
     prompt = _COMPLETION_PROMPT.format(reference=reference, model_answer=model_answer)
-    response = litellm.text_completion(
-        model=f"openai/{model}",
-        api_base=base_url.rstrip("/") + "/v1",
-        api_key="EMPTY",
-        prompt=prompt,
-        temperature=0.0,
-        max_tokens=4,
-    )
-    text = (response.choices[0].text or "").strip().lower()
-    first = text.split()[0] if text else ""
-    return first.startswith("yes")
+    for attempt in range(max_retries):
+        try:
+            response = litellm.text_completion(
+                model=f"openai/{model}",
+                api_base=base_url.rstrip("/") + "/v1",
+                api_key="EMPTY",
+                prompt=prompt,
+                temperature=0.0,
+                max_tokens=4,
+            )
+            text = (response.choices[0].text or "").strip().lower()
+            first = text.split()[0] if text else ""
+            return first.startswith("yes")
+        except _TRANSIENT_ERRORS:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _gemini_judge(reference: str, model_answer: str, *, max_retries: int) -> bool:

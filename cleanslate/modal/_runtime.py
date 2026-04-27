@@ -46,6 +46,41 @@ def build_training_image() -> modal.Image:
     )
 
 
+def build_eval_image() -> modal.Image:
+    """Image used by memorization eval jobs.
+
+    Includes vLLM (which the training image excludes) because
+    ``MemorizationEvaluator`` runs vLLM in-process for prompt-logprob
+    extraction.
+    """
+    return (
+        modal.Image.from_registry(
+            "nvidia/cuda:12.8.1-devel-ubuntu24.04", add_python="3.12"
+        )
+        .entrypoint([])
+        .apt_install("git")
+        .uv_pip_install(
+            "vllm==0.19.1",
+            "torch==2.10.0",
+            "transformers==5.6.0",
+            "datasets==4.7.0",
+            "pyarrow==23.0.1",
+            "pyyaml==6.0.3",
+            "typer==0.24.1",
+            "rich==14.3.3",
+            "tqdm==4.67.3",
+            "hf-transfer==0.1.9",
+        )
+        .env(
+            {
+                "HF_HUB_ENABLE_HF_TRANSFER": "1",
+                "HF_HOME": "/model_cache",
+            }
+        )
+        .add_local_python_source("cleanslate")
+    )
+
+
 HF_CACHE = modal.Volume.from_name("hf-cache", create_if_missing=True)
 RUNS_VOLUME = modal.Volume.from_name("training-runs", create_if_missing=True)
 HF_SECRET = modal.Secret.from_name("huggingface")
