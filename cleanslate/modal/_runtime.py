@@ -35,6 +35,11 @@ def build_training_image() -> modal.Image:
             "rich==14.3.3",
             "tqdm==4.67.3",
             "hf-transfer==0.1.9",
+            # Nemotron-Nano-9B-v2 is a hybrid Mamba+Transformer architecture and
+            # transformers raises `ImportError: mamba-ssm is required by the
+            # Mamba model` on `from_pretrained` without these.
+            "mamba-ssm",
+            "causal-conv1d",
         )
         .env(
             {
