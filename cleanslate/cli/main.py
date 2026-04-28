@@ -10,7 +10,7 @@ from rich.console import Console
 
 from cleanslate.cli.eval import eval_cmd
 from cleanslate.cli.fsid import fsid_app
-from cleanslate.cli.score import score_cmd
+from cleanslate.cli.score import score_cmd, score_post_cmd, score_pre_cmd
 from cleanslate.cli.validate import generate_cmd, judge_cmd, validate_cmd
 
 app = typer.Typer(name="cleanslate", help="Memorization evaluation and unlearning for LLMs.")
@@ -21,6 +21,8 @@ app.command(name="generate")(generate_cmd)
 app.command(name="judge")(judge_cmd)
 app.command(name="validate")(validate_cmd)
 app.command(name="score")(score_cmd)
+app.command(name="score-pre")(score_pre_cmd)
+app.command(name="score-post")(score_post_cmd)
 app.add_typer(fsid_app)
 
 
