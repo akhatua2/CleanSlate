@@ -3,7 +3,7 @@ eval:
   window_suffix_len: 100
   window_stride: 10
   tau_min: 0.001
-  batch_size: 2048       # prompts are <=80 tokens; bigger batches fill vLLM scheduler
+  batch_size: 16384      # B200 has 183 GB; max_model_len=512 → big batches amortize Python overhead
 
 vllm:
   num_gpus: 1
