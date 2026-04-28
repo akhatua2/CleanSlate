@@ -9,6 +9,7 @@ vllm:
   num_gpus: 1
   data_parallel: 1
   gpu_memory_utilization: 0.95
+  gpu_ids: [6]
   max_model_len: 512     # prefix+suffix are <=80 tokens; smaller frees KV cache
   dtype: bfloat16
   enforce_eager: false

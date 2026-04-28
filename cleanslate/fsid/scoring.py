@@ -74,8 +74,54 @@ class UnlearningScore:
     retain_mean_abs_delta_mean_ppl: float | None = None
     retain_mean_abs_delta_min_ppl: float | None = None
 
-    validation_deltas: list[dict[str, Any]] | None = None
+    # Window-level memorization transitions
+    forget_windows_memorized_pre: int | None = None
+    forget_windows_memorized_post: int | None = None
+    forget_windows_delta_memorized: int | None = None
+    retain_windows_memorized_pre: int | None = None
+    retain_windows_memorized_post: int | None = None
+    retain_windows_delta_memorized: int | None = None
+
+    # Aggregated benchmark groups (BBH, MMLU)
+    bbh_pre_eq_weighted: float | None = None
+    bbh_post_eq_weighted: float | None = None
+    bbh_delta_eq_weighted: float | None = None
+    bbh_pre_sample_weighted: float | None = None
+    bbh_post_sample_weighted: float | None = None
+    bbh_delta_sample_weighted: float | None = None
+    bbh_n_subtasks: int | None = None
+    bbh_n_samples: int | None = None
+    mmlu_pre_eq_weighted: float | None = None
+    mmlu_post_eq_weighted: float | None = None
+    mmlu_delta_eq_weighted: float | None = None
+    mmlu_pre_sample_weighted: float | None = None
+    mmlu_post_sample_weighted: float | None = None
+    mmlu_delta_sample_weighted: float | None = None
+    mmlu_n_subtasks: int | None = None
+    mmlu_n_samples: int | None = None
+
+    # GSM8K filter split (both already scored side-by-side)
+    gsm8k_strict_pre: float | None = None
+    gsm8k_strict_post: float | None = None
+    gsm8k_strict_delta: float | None = None
+    gsm8k_flexible_pre: float | None = None
+    gsm8k_flexible_post: float | None = None
+    gsm8k_flexible_delta: float | None = None
+
+    # cleanslate_qa split by content_id in forget_ids
+    qa_forget_pre: float | None = None
+    qa_forget_post: float | None = None
+    qa_forget_delta: float | None = None
+    qa_forget_n: int | None = None
+    qa_retain_pre: float | None = None
+    qa_retain_post: float | None = None
+    qa_retain_delta: float | None = None
+    qa_retain_n: int | None = None
+
+    # Per-task generation-derived deltas (one row per surface)
+    generation_deltas: list[dict[str, Any]] | None = None
     utility_retained: float | None = None
+    utility_retained_sample_weighted: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -192,13 +238,168 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _aggregate_generations(
+    pre_repo: str,
+    post_repo: str,
+    *,
+    forget_ids: set[str],
+) -> dict[str, Any]:
+    """Compute per-task pre/post/delta from pushed generations datasets.
+
+    For every config that exists in both pre_repo and post_repo:
+      - mean of `score` column = canonical task accuracy
+      - if task == "gsm8k": split rows by `filter` field, report strict-match
+        and flexible-extract separately
+      - if task == "cleanslate_qa": split rows by doc.content_id in forget_ids
+    Then merge bbh_* (27 subtasks) and mmlu_* (57 subtasks) into single
+    equal-weighted and sample-weighted aggregates.
+
+    Fails loudly on schema or coverage problems.
+    """
+    from datasets import get_dataset_config_names, load_dataset
+
+    pre_cfgs = set(get_dataset_config_names(pre_repo))
+    post_cfgs = set(get_dataset_config_names(post_repo))
+    only_pre = pre_cfgs - post_cfgs
+    only_post = post_cfgs - pre_cfgs
+    if only_pre or only_post:
+        raise ValueError(
+            f"config mismatch between {pre_repo} and {post_repo}: "
+            f"only-in-pre={sorted(only_pre)}, only-in-post={sorted(only_post)}"
+        )
+    configs = sorted(pre_cfgs)
+
+    def _scores(repo: str, cfg: str) -> list[dict[str, Any]]:
+        ds = load_dataset(repo, cfg, split="train")
+        if "score" not in ds.column_names:
+            raise KeyError(f"generations dataset {repo}/{cfg} has no 'score' column")
+        return list(ds)
+
+    def _row(name: str, pre: float, post: float, n: int) -> dict[str, Any]:
+        return {
+            "benchmark": name,
+            "pre": pre,
+            "post": post,
+            "delta": post - pre,
+            "retention": (post / pre) if pre > 0 else 0.0,
+            "n": n,
+        }
+
+    bbh_subs: list[tuple[str, float, float, int]] = []
+    mmlu_subs: list[tuple[str, float, float, int]] = []
+    standalone_rows: list[dict[str, Any]] = []
+    out: dict[str, Any] = {}
+
+    for cfg in configs:
+        pre_rows = _scores(pre_repo, cfg)
+        post_rows = _scores(post_repo, cfg)
+        pre_acc = _mean([float(r["score"] or 0.0) for r in pre_rows])
+        post_acc = _mean([float(r["score"] or 0.0) for r in post_rows])
+        n = len(pre_rows)
+
+        if cfg.startswith("bbh_cot_fewshot_"):
+            bbh_subs.append((cfg, pre_acc, post_acc, n))
+            continue
+        if cfg.startswith("mmlu_"):
+            mmlu_subs.append((cfg, pre_acc, post_acc, n))
+            continue
+        if cfg == "gsm8k":
+            for filt in ("strict-match", "flexible-extract"):
+                pre_f = [float(r["score"] or 0.0) for r in pre_rows if r.get("filter") == filt]
+                post_f = [float(r["score"] or 0.0) for r in post_rows if r.get("filter") == filt]
+                if not pre_f or not post_f:
+                    raise ValueError(
+                        f"gsm8k generations missing '{filt}' filter rows "
+                        f"(pre n={len(pre_f)}, post n={len(post_f)}) — re-generate with both filters"
+                    )
+                p_acc = _mean(pre_f)
+                q_acc = _mean(post_f)
+                standalone_rows.append(_row(f"gsm8k_{filt}", p_acc, q_acc, len(pre_f)))
+                out[f"gsm8k_{filt.replace('-', '_').replace('flexible_extract', 'flexible').replace('strict_match', 'strict')}_pre"] = p_acc
+                out[f"gsm8k_{filt.replace('-', '_').replace('flexible_extract', 'flexible').replace('strict_match', 'strict')}_post"] = q_acc
+                out[f"gsm8k_{filt.replace('-', '_').replace('flexible_extract', 'flexible').replace('strict_match', 'strict')}_delta"] = q_acc - p_acc
+            continue
+        if cfg == "cleanslate_qa":
+            standalone_rows.append(_row(cfg, pre_acc, post_acc, n))
+
+            def _doc_cid(r: dict[str, Any]) -> str:
+                doc = r.get("doc") or {}
+                cid = doc.get("content_id")
+                if cid is None:
+                    raise KeyError("cleanslate_qa rows lack doc.content_id; cannot split forget/retain")
+                return str(cid)
+
+            f_pre = [float(r["score"] or 0.0) for r in pre_rows if _doc_cid(r) in forget_ids]
+            r_pre = [float(r["score"] or 0.0) for r in pre_rows if _doc_cid(r) not in forget_ids]
+            f_post = [float(r["score"] or 0.0) for r in post_rows if _doc_cid(r) in forget_ids]
+            r_post = [float(r["score"] or 0.0) for r in post_rows if _doc_cid(r) not in forget_ids]
+            qa_f_pre = _mean(f_pre); qa_f_post = _mean(f_post)
+            qa_r_pre = _mean(r_pre); qa_r_post = _mean(r_post)
+            standalone_rows.append(_row("cleanslate_qa-forget", qa_f_pre, qa_f_post, len(f_pre)))
+            standalone_rows.append(_row("cleanslate_qa-retain", qa_r_pre, qa_r_post, len(r_pre)))
+            out["qa_forget_pre"] = qa_f_pre
+            out["qa_forget_post"] = qa_f_post
+            out["qa_forget_delta"] = qa_f_post - qa_f_pre
+            out["qa_forget_n"] = len(f_pre)
+            out["qa_retain_pre"] = qa_r_pre
+            out["qa_retain_post"] = qa_r_post
+            out["qa_retain_delta"] = qa_r_post - qa_r_pre
+            out["qa_retain_n"] = len(r_pre)
+            continue
+
+        standalone_rows.append(_row(cfg, pre_acc, post_acc, n))
+
+    def _aggregate_group(label: str, subs: list[tuple[str, float, float, int]]) -> None:
+        if not subs:
+            return
+        eq_pre = _mean([s[1] for s in subs])
+        eq_post = _mean([s[2] for s in subs])
+        total_n = sum(s[3] for s in subs)
+        sw_pre = sum(s[1] * s[3] for s in subs) / total_n if total_n else 0.0
+        sw_post = sum(s[2] * s[3] for s in subs) / total_n if total_n else 0.0
+        out[f"{label}_pre_eq_weighted"] = eq_pre
+        out[f"{label}_post_eq_weighted"] = eq_post
+        out[f"{label}_delta_eq_weighted"] = eq_post - eq_pre
+        out[f"{label}_pre_sample_weighted"] = sw_pre
+        out[f"{label}_post_sample_weighted"] = sw_post
+        out[f"{label}_delta_sample_weighted"] = sw_post - sw_pre
+        out[f"{label}_n_subtasks"] = len(subs)
+        out[f"{label}_n_samples"] = total_n
+        # Use equal-weighted for the merged generation_deltas row (paper convention).
+        standalone_rows.append({
+            "benchmark": label,
+            "pre": eq_pre,
+            "post": eq_post,
+            "delta": eq_post - eq_pre,
+            "retention": (eq_post / eq_pre) if eq_pre > 0 else 0.0,
+            "n": total_n,
+            "n_subtasks": len(subs),
+        })
+
+    _aggregate_group("bbh", bbh_subs)
+    _aggregate_group("mmlu", mmlu_subs)
+
+    standalone_rows.sort(key=lambda r: r["benchmark"])
+    out["generation_deltas"] = standalone_rows
+
+    # Utility retained over the merged surface (each row counts once):
+    # exclude the cleanslate_qa-forget/retain split rows from the average so
+    # they don't double-count the cleanslate_qa parent.
+    util_rows = [r for r in standalone_rows if r["benchmark"] not in ("cleanslate_qa-forget", "cleanslate_qa-retain")]
+    if util_rows:
+        out["utility_retained"] = _mean([r["retention"] for r in util_rows])
+        total_n = sum(r["n"] for r in util_rows) or 1
+        out["utility_retained_sample_weighted"] = sum(r["retention"] * r["n"] for r in util_rows) / total_n
+    return out
+
+
 def compute_score(
     *,
     forget_set_path: str | Path,
     pre_eval_path: str | Path,
     post_eval_path: str | Path,
-    pre_validation_path: str | Path | None = None,
-    post_validation_path: str | Path | None = None,
+    pre_generations_path: str,
+    post_generations_path: str,
 ) -> UnlearningScore:
     """Compute a benchmark score from local pre/post eval artifacts.
 
@@ -304,30 +505,35 @@ def compute_score(
             d.windows_retained_memorized for d in forget_deltas if d.windows_retained_memorized is not None
         )
         f_pre_mem = f_forg + f_ret_mem
+        f_post_mem = f_ret_mem + f_reg
         window_agg["forget_total_windows"] = f_total
         window_agg["forget_windows_forgotten"] = f_forg
         window_agg["forget_windows_regressed"] = f_reg
         window_agg["forget_window_forget_rate"] = f_forg / f_pre_mem if f_pre_mem > 0 else 0.0
+        window_agg["forget_windows_memorized_pre"] = f_pre_mem
+        window_agg["forget_windows_memorized_post"] = f_post_mem
+        window_agg["forget_windows_delta_memorized"] = f_pre_mem - f_post_mem
     if any(d.num_windows is not None for d in retain_deltas):
         r_total = sum(d.num_windows for d in retain_deltas if d.num_windows is not None)
         r_reg = sum(d.windows_regressed for d in retain_deltas if d.windows_regressed is not None)
+        r_forg = sum(d.windows_forgotten for d in retain_deltas if d.windows_forgotten is not None)
+        r_ret_mem = sum(
+            d.windows_retained_memorized for d in retain_deltas if d.windows_retained_memorized is not None
+        )
+        r_pre_mem = r_forg + r_ret_mem
+        r_post_mem = r_ret_mem + r_reg
         window_agg["retain_total_windows"] = r_total
         window_agg["retain_windows_regressed"] = r_reg
         window_agg["retain_window_stability"] = 1.0 - (r_reg / r_total) if r_total > 0 else 1.0
+        window_agg["retain_windows_memorized_pre"] = r_pre_mem
+        window_agg["retain_windows_memorized_post"] = r_post_mem
+        window_agg["retain_windows_delta_memorized"] = r_pre_mem - r_post_mem
 
-    validation_kwargs: dict[str, Any] = {}
-    if pre_validation_path is not None and post_validation_path is not None:
-        from cleanslate.validation import compare_validations, load_validation
-
-        deltas_val = compare_validations(
-            load_validation(pre_validation_path),
-            load_validation(post_validation_path),
-        )
-        if deltas_val:
-            validation_kwargs["validation_deltas"] = [asdict(d) for d in deltas_val]
-            validation_kwargs["utility_retained"] = sum(
-                d.relative_retention for d in deltas_val
-            ) / len(deltas_val)
+    generation_kwargs = _aggregate_generations(
+        str(pre_generations_path),
+        str(post_generations_path),
+        forget_ids=forget_ids,
+    )
 
     return UnlearningScore(
         forget_count=len(forget_deltas),
@@ -342,7 +548,7 @@ def compute_score(
         per_content=deltas,
         **ppl_agg,
         **window_agg,
-        **validation_kwargs,
+        **generation_kwargs,
     )
 
 
