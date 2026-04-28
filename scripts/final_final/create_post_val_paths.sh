@@ -1,11 +1,8 @@
-#!/usr/bin/env bash
 set -uo pipefail
 source .venv/bin/activate
 ulimit -n 1048576
-
 mkdir -p logs
 
-# --- 1. Start judge server in background, wait until it's ready --------
 CUDA_VISIBLE_DEVICES=6 vllm serve Qwen/Qwen3.5-9B \
     --host 127.0.0.1 --port 42800 \
     --gpu-memory-utilization 0.92 \
@@ -14,7 +11,6 @@ CUDA_VISIBLE_DEVICES=6 vllm serve Qwen/Qwen3.5-9B \
     > logs/judge_server.log 2>&1 &
 JUDGE_PID=$!
 
-# Track every background validate so the trap can clean them up too.
 VAL_PIDS=()
 cleanup() {
     for pid in "${VAL_PIDS[@]:-}" "$JUDGE_PID"; do
@@ -30,7 +26,6 @@ until curl -sf http://127.0.0.1:42800/v1/models >/dev/null; do
 done
 echo "Judge server ready."
 
-# --- 2. Run validations in parallel, one model per GPU -----------------
 export JUDGE_BASE_URL=http://127.0.0.1:42800
 export JUDGE_MODEL=Qwen/Qwen3.5-9B
 export HF_ALLOW_CODE_EVAL=1
@@ -49,19 +44,14 @@ run_validate() {
         -m "$alias_name" \
         -B full \
         --skip-done \
-        -o "results/pre_val/${alias_name}/validate" \
+        -o "results/post_val/${alias_name}/validate" \
         --push-to-hub \
-        --push-suffix pre_val \
+        --push-suffix post_val \
         > "logs/validate_${alias_name}.log" 2>&1
 }
 
-# --- 3. Rolling 3-slot scheduler ---------------------------------------
-# Three GPUs are slots. We launch one job per slot; whenever any job
-# finishes, we immediately dispatch the next pending model on its freed GPU.
-# Requires bash 5.1+ for `wait -n -p`.
-
 GPUS=(2 7 4)
-JOBS=(olmo-7b llama-8b nemotron-9b qwen-8b gemma-12b olmo-32b)
+JOBS=(<> <> <> <> <> <>)
 
 declare -A EXITS
 declare -A PID_GPU
@@ -78,7 +68,6 @@ dispatch() {
 }
 
 next_idx=0
-# Prime each slot.
 for gpu in "${GPUS[@]}"; do
     if (( next_idx < ${#JOBS[@]} )); then
         dispatch "$gpu" "${JOBS[next_idx]}"
@@ -86,7 +75,6 @@ for gpu in "${GPUS[@]}"; do
     fi
 done
 
-# Roll: each time a slot frees, dispatch the next pending job onto it.
 while (( ${#PID_GPU[@]} > 0 )); do
     wait -n -p done_pid
     code=$?
