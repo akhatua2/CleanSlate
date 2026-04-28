@@ -35,11 +35,23 @@ def build_training_image() -> modal.Image:
             "rich==14.3.3",
             "tqdm==4.67.3",
             "hf-transfer==0.1.9",
-            # Nemotron-Nano-9B-v2 is a hybrid Mamba+Transformer architecture and
-            # transformers raises `ImportError: mamba-ssm is required by the
-            # Mamba model` on `from_pretrained` without these.
-            "mamba-ssm",
-            "causal-conv1d",
+            # `packaging` and `setuptools` are explicit because mamba-ssm's setup.py
+            # imports them; with --no-build-isolation they must come from the env.
+            "packaging",
+            "setuptools",
+            "wheel",
+            "ninja",
+        )
+        # mamba-ssm + causal-conv1d are required by Nemotron-Nano-9B-v2's hybrid
+        # Mamba+Transformer architecture; transformers raises
+        # `ImportError: mamba-ssm is required` otherwise. Installed in a second
+        # stage with `--no-build-isolation` because they have CUDA extensions
+        # that import torch at build time and uv_pip_install runs builds in
+        # isolated envs that don't see torch.
+        .pip_install(
+            "causal-conv1d>=1.4.0",
+            "mamba-ssm>=2.2.0",
+            extra_options="--no-build-isolation",
         )
         .env(
             {
