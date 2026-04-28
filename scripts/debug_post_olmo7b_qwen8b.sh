@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Debug post-train pipeline on existing checkpoints, run SERIALLY.
-#   - GPU 3:    judge server (Qwen/Qwen3.5-9B via vLLM)
-#   - GPU 6,7: each model's eval (DP=2 via config_dp2_gpu67.yaml),
-#              followed by its validate on GPU 6 (judge already pinned to 3,
-#              so validate has GPU 6 to itself).
+# Debug post-train pipeline on existing checkpoints, run in PARALLEL.
+#   - GPU 3:  judge server (Qwen/Qwen3.5-9B via vLLM)
+#   - GPU 6:  olmo eval (DP=1) -> olmo validate
+#   - GPU 7:  qwen eval (DP=1) -> qwen validate
 #
-# Order: olmo eval -> olmo validate -> qwen eval -> qwen validate.
+# Eval GPU pin lives in the config files (config.yaml -> [6], config_dp1_gpu7.yaml -> [7]).
+# Validate uses CUDA_VISIBLE_DEVICES (no per-task config knob).
+# Each model's leg runs as a single background process — eval then validate, sequentially within
+# the leg, so each GPU goes from eval->validate without contention.
 set -uo pipefail
 source .venv/bin/activate
 ulimit -n 1048576
@@ -35,7 +37,7 @@ echo "[debug] qwen ckpt: $QWEN_CKPT"
 # --- 1. Judge server on GPU 3 -----------------------------------------
 CUDA_VISIBLE_DEVICES=3 vllm serve Qwen/Qwen3.5-9B \
     --host 127.0.0.1 --port 42800 \
-    --gpu-memory-utilization 0.55 \
+    --gpu-memory-utilization 0.90 \
     --max-model-len 4096 \
     --dtype bfloat16 \
     > "$JUDGE_LOG" 2>&1 &
@@ -63,29 +65,26 @@ if [[ -n "${LOCAL_MACHINE_CACHE:-}" ]]; then
 fi
 unset GEMINI_API_KEY
 
-# --- 3. Per-leg runner: eval (DP=2 on 6,7) then validate (GPU 6) ------
-EVAL_CONFIG="config_dp2_gpu67.yaml"
-VALIDATE_GPU=6
-
+# --- 3. Per-leg runner: eval (DP=1, config-pinned GPU) then validate (env-pinned GPU) -
 run_leg() {
-  local ckpt="$1" eval_out="$2" val_out="$3" log_pfx="$4" suffix="$5"
+  local ckpt="$1" eval_cfg="$2" eval_out="$3" val_out="$4" val_gpu="$5" log_pfx="$6" suffix="$7"
 
-  echo "[debug][$suffix] eval (DP=2 on 6,7) — config=$EVAL_CONFIG"
+  echo "[debug][$suffix] eval (DP=1, config=$eval_cfg)"
   cleanslate eval \
     -m "$ckpt" \
-    --config "$EVAL_CONFIG" \
+    --config "$eval_cfg" \
     -o "$eval_out" \
     --hf-org "$HF_ORG" \
     --push-suffix "$suffix" \
-    2>&1 | tee "${log_pfx}_eval.log"
-  local eval_rc=${PIPESTATUS[0]}
+    > "${log_pfx}_eval.log" 2>&1
+  local eval_rc=$?
   if [[ $eval_rc -ne 0 ]]; then
     echo "[debug][$suffix] eval FAILED (rc=$eval_rc) — see ${log_pfx}_eval.log"
     return $eval_rc
   fi
 
-  echo "[debug][$suffix] validate on GPU $VALIDATE_GPU"
-  CUDA_VISIBLE_DEVICES="$VALIDATE_GPU" cleanslate validate \
+  echo "[debug][$suffix] validate on GPU $val_gpu"
+  CUDA_VISIBLE_DEVICES="$val_gpu" cleanslate validate \
     -m "$ckpt" \
     -B full \
     --skip-done \
@@ -93,13 +92,23 @@ run_leg() {
     --push-to-hub \
     --hf-org "$HF_ORG" \
     --push-suffix "$suffix" \
-    2>&1 | tee "${log_pfx}_validate.log"
-  return ${PIPESTATUS[0]}
+    > "${log_pfx}_validate.log" 2>&1
+  return $?
 }
 
+# --- 4. Launch both legs in PARALLEL ----------------------------------
+echo "[debug] launching olmo (GPU 6) + qwen (GPU 7) in parallel"
+
+run_leg "$OLMO_CKPT" "config.yaml"           "$OLMO_EVAL_OUT" "$OLMO_VAL_OUT" 6 "$OLMO_LOG" "${DEBUG_TAG}-olmo" &
+OLMO_PID=$!
+run_leg "$QWEN_CKPT" "config_dp1_gpu7.yaml"  "$QWEN_EVAL_OUT" "$QWEN_VAL_OUT" 7 "$QWEN_LOG" "${DEBUG_TAG}-qwen" &
+QWEN_PID=$!
+
+echo "[debug] olmo pid=$OLMO_PID, qwen pid=$QWEN_PID"
+
 OLMO_RC=0; QWEN_RC=0
-run_leg "$OLMO_CKPT" "$OLMO_EVAL_OUT" "$OLMO_VAL_OUT" "$OLMO_LOG" "$DEBUG_TAG-olmo" || OLMO_RC=$?
-run_leg "$QWEN_CKPT" "$QWEN_EVAL_OUT" "$QWEN_VAL_OUT" "$QWEN_LOG" "$DEBUG_TAG-qwen" || QWEN_RC=$?
+wait "$OLMO_PID" || OLMO_RC=$?
+wait "$QWEN_PID" || QWEN_RC=$?
 
 echo "[debug] olmo leg rc=$OLMO_RC  qwen leg rc=$QWEN_RC"
 echo "  olmo eval log:     ${OLMO_LOG}_eval.log"

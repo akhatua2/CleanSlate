@@ -1,6 +1,20 @@
-"""Model aliases for convenience."""
+"""Model aliases and HF-checkpoint resolution.
+
+`resolve_model` accepts:
+
+  - a registered alias (e.g. `qwen-8b`)               -> mapped HF path
+  - a plain HF repo                                   -> repo string passthrough
+  - `<hf_repo>:<N>` or `<hf_repo>:checkpoint-<N>`     -> snapshot_download just
+    that intermediate-checkpoint subfolder, return its local path. Lets eval
+    clusters target a specific intermediate checkpoint without pulling the
+    whole training repo (which contains optimizer.pt etc).
+  - `<hf_repo>:<subfolder>`                            -> arbitrary subfolder
+  - a local filesystem path                            -> passthrough
+"""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 MODEL_ALIASES: dict[str, tuple[str, str]] = {
     # ~8B cross-family (latest gen)
@@ -9,28 +23,46 @@ MODEL_ALIASES: dict[str, tuple[str, str]] = {
     "olmo-7b": ("allenai/Olmo-3-1025-7B", "olmo-3-7b"),
     "nemotron-9b": ("nvidia/NVIDIA-Nemotron-Nano-9B-v2", "nemotron-nano-9b-v2"),
     "gemma-12b": ("google/gemma-3-12b-pt", "gemma-3-12b"),
-    # "marin-8b": ("marin-community/marin-8b-base", "marin-8b"),
-    # Qwen version range (~8B)
-    # "qwen2-7b": ("Qwen/Qwen2-7B", "qwen2-7b"),
-    # "qwen2.5-7b": ("Qwen/Qwen2.5-7B", "qwen2_5-7b"),
-    # "qwen3.5-9b": ("Qwen/Qwen3.5-9B", "qwen3_5-9b"),
-    # Qwen2.5-7B training stages
-    # "qwen2.5-7b-instruct": ("Qwen/Qwen2.5-7B-Instruct", "qwen2_5-7b-instruct"),
-    # "qwen2.5-coder-7b": ("Qwen/Qwen2.5-Coder-7B", "qwen2_5-coder-7b"),
-    # "qwen2.5-coder-7b-instruct": ("Qwen/Qwen2.5-Coder-7B-Instruct", "qwen2_5-coder-7b-instruct"),
-    # "qwen2.5-math-7b": ("Qwen/Qwen2.5-Math-7B", "qwen2_5-math-7b"),
-    # "qwen2.5-math-7b-instruct": ("Qwen/Qwen2.5-Math-7B-Instruct", "qwen2_5-math-7b-instruct"),
     # ~32B range
     "olmo-32b": ("allenai/Olmo-3-1125-32B", "olmo-3-32b"),
-    # "qwen-32b": ("Qwen/Qwen3-32B", "qwen3-32b"),
-    # "gemma-27b": ("google/gemma-3-27b-pt", "gemma-3-27b"),
-    # "marin-32b": ("marin-community/marin-32b-base", "marin-32b"),
 }
 
 
+def _materialize_checkpoint(repo: str, suffix: str) -> str:
+    """Download just `<repo>/<subfolder>/*` to local cache and return its path.
+
+    `suffix` is treated as `checkpoint-<N>` if numeric, else as the subfolder
+    name verbatim. Raises `FileNotFoundError` if the subfolder doesn't exist
+    in the repo.
+    """
+    from huggingface_hub import snapshot_download
+
+    sub = f"checkpoint-{suffix}" if suffix.isdigit() else suffix
+    cache = snapshot_download(
+        repo_id=repo,
+        repo_type="model",
+        allow_patterns=[f"{sub}/*"],
+    )
+    local = Path(cache) / sub
+    if not local.exists():
+        raise FileNotFoundError(
+            f"Subfolder {sub!r} not found in {repo!r} after snapshot_download "
+            f"(searched in {cache!r}). Check the checkpoint number and repo."
+        )
+    return str(local)
+
+
 def resolve_model(model: str) -> tuple[str, str]:
-    """Resolve a model alias to (hf_path, clean_name)."""
+    """Resolve a model spec to (hf_path_or_local_dir, clean_name)."""
     if model in MODEL_ALIASES:
         return MODEL_ALIASES[model]
+
+    if ":" in model and not model.startswith(("/", ".", "~")):
+        repo, suffix = model.split(":", 1)
+        if "/" in repo and not Path(repo).exists():
+            local = _materialize_checkpoint(repo, suffix)
+            clean = f"{repo.split('/')[-1]}-{suffix}".lower().replace(".", "_")
+            return local, clean
+
     clean = model.split("/")[-1].lower().replace(".", "_")
     return model, clean
