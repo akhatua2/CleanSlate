@@ -233,14 +233,19 @@ for RULE in $RULES; do
     fi
     POST_VALIDATION_JSON="${POST_VALIDATION_ROOT}/${POST_EVAL_CLEAN}.json"
 
-    # 4d. Score (forget + retain + utility retention, all in one JSON).
+    # 4d. Score: nested JSON with forget/retain memorization deltas + per-task
+    # retention. Generations come from the pushed pre/post HF datasets (the
+    # `validate --push-to-hub` calls above). Validation JSON deltas are no
+    # longer consumed — their info is already in the per-task retention block.
     if ! is_done "score-${TAG}"; then
+      POST_GEN_DS="${HF_ORG}/generations-${POST_EVAL_CLEAN}"
       run cleanslate score \
-        --forget-path "$FORGET_SET" \
+        --forget-pool "$FORGET_SET" \
         --pre-eval "$PRE_EVAL_PARQUET" \
         --post-eval "$POST_EVAL_PARQUET" \
-        --pre-validation "$PRE_VALIDATION_JSON" \
-        --post-validation "$POST_VALIDATION_JSON" \
+        --pre-generations "${HF_ORG}/generations-${MODEL_CLEAN}-pre" \
+        --post-generations "$POST_GEN_DS" \
+        --checkpoint "$CKPT_REPO" \
         -o "${RUN_ROOT}/score.json"
       mark_done "score-${TAG}"
     fi
@@ -251,4 +256,4 @@ done
 
 echo
 echo "Sweep complete for ${MODEL} (clean=${MODEL_CLEAN})."
-echo "Next: python scripts/aggregate_scores.py --root ${RESULTS_ROOT}/fsid"
+echo "Per-experiment score JSONs: ${RESULTS_ROOT}/fsid/<rule>-<obj>/score.json"
