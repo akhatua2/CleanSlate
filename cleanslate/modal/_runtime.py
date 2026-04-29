@@ -42,17 +42,20 @@ def build_training_image() -> modal.Image:
             "wheel",
             "ninja",
         )
-        # mamba-ssm is required by Nemotron-Nano-9B-v2's hybrid Mamba+Transformer
-        # architecture; transformers raises `ImportError: mamba-ssm is required`
-        # otherwise. Installed with `--no-build-isolation` because the package
-        # has CUDA extensions that import torch at build time.
+        # mamba-ssm + causal-conv1d are required by Nemotron-Nano-9B-v2's hybrid
+        # Mamba+Transformer architecture. Without causal-conv1d's `causal_conv1d_fn`,
+        # mamba falls back to a naive PyTorch path that is ~30× slower (verified
+        # against this exact training setup).
         #
-        # `causal-conv1d` is intentionally NOT installed — its from-source build
-        # consistently fails on Blackwell (B200, compute cap 10.0) and mamba-ssm
-        # has a slow-path fallback when it's missing. If the slow path is too
-        # slow, swap in a prebuilt causal-conv1d wheel from the upstream
-        # release page (Dao-AILab/causal-conv1d).
+        # Both packages have CUDA extensions that need TORCH_CUDA_ARCH_LIST set
+        # at build time. The default arch list ("7.0;7.5;8.0;8.6;9.0") doesn't
+        # include Blackwell (sm_100), and causal-conv1d's setup.py errors when
+        # the GPU's compute capability isn't covered. We set "9.0+PTX" so the
+        # Hopper kernel + PTX bytecode is built; the +PTX is forward-JIT'd to
+        # sm_100 on Blackwell at first kernel launch.
+        .env({"TORCH_CUDA_ARCH_LIST": "9.0+PTX"})
         .pip_install(
+            "causal-conv1d>=1.4.0",
             "mamba-ssm>=2.2.0",
             extra_options="--no-build-isolation",
         )
