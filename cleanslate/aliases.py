@@ -25,6 +25,10 @@ MODEL_ALIASES: dict[str, tuple[str, str]] = {
     "gemma-12b": ("google/gemma-3-12b-pt", "gemma-3-12b"),
     # ~32B range
     "olmo-32b": ("allenai/Olmo-3-1125-32B", "olmo-3-32b"),
+    # avoid
+    "olmo-32b-think": ("allenai/Olmo-3-32B-Think", "olmo-3-32b-think"),
+    "gemma-12b-it": ("google/gemma-3-12b-it", "gemma-3-12b-it"),
+    "qwen3-coder-next": ("Qwen/Qwen3-Coder-Next", "qwen3-coder-next"),
 }
 
 
