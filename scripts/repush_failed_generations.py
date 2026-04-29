@@ -40,6 +40,16 @@ JOBS = [
             "generations-simnpo_qwen3-8b_20260428_063109-debug-post-qwen"
         ),
     },
+    {
+        "alias": "gemma-12b-it",
+        "scored_dir": Path("results/pre_val/gemma-12b-it/validate/generations/scored"),
+        "repo": "unlearning-cleanslate/generations-gemma-3-12b-it-pre_val",
+    },
+    {
+        "alias": "olmo-32b-think",
+        "scored_dir": Path("results/pre_val/olmo-32b-think/validate/generations/scored"),
+        "repo": "unlearning-cleanslate/generations-olmo-3-32b-think-pre_val",
+    },
 ]
 SLEEP_BETWEEN_CONFIGS = 1
 
