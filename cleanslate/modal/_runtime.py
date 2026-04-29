@@ -42,14 +42,17 @@ def build_training_image() -> modal.Image:
             "wheel",
             "ninja",
         )
-        # mamba-ssm + causal-conv1d are required by Nemotron-Nano-9B-v2's hybrid
-        # Mamba+Transformer architecture; transformers raises
-        # `ImportError: mamba-ssm is required` otherwise. Installed in a second
-        # stage with `--no-build-isolation` because they have CUDA extensions
-        # that import torch at build time and uv_pip_install runs builds in
-        # isolated envs that don't see torch.
+        # mamba-ssm is required by Nemotron-Nano-9B-v2's hybrid Mamba+Transformer
+        # architecture; transformers raises `ImportError: mamba-ssm is required`
+        # otherwise. Installed with `--no-build-isolation` because the package
+        # has CUDA extensions that import torch at build time.
+        #
+        # `causal-conv1d` is intentionally NOT installed — its from-source build
+        # consistently fails on Blackwell (B200, compute cap 10.0) and mamba-ssm
+        # has a slow-path fallback when it's missing. If the slow path is too
+        # slow, swap in a prebuilt causal-conv1d wheel from the upstream
+        # release page (Dao-AILab/causal-conv1d).
         .pip_install(
-            "causal-conv1d>=1.4.0",
             "mamba-ssm>=2.2.0",
             extra_options="--no-build-isolation",
         )
