@@ -14,8 +14,10 @@ venv/
 .mypy_cache/
 .cache/
 .claude/
+.codex 
 
 results/
+cache/
 runs/
 data/
 outputs/

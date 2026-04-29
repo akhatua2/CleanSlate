@@ -3,6 +3,7 @@
 import glob
 import json
 import logging
+import os
 import re
 import statistics
 import time
@@ -23,7 +24,7 @@ _TASKS_DIR = str(Path(__file__).parent / "tasks")
 # Tasks whose metric requires an external LLM judge (Gemini). Anything else
 # falls back to lm-eval's own task.process_results aggregation.
 _JUDGE_TASKS = {"cleanslate_qa"}
-_JUDGE_WORKERS = 50
+_JUDGE_WORKERS = int(os.environ.get("JUDGE_WORKERS", "50"))
 
 logger = logging.getLogger(__name__)
 

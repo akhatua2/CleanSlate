@@ -73,7 +73,7 @@ def _remote_judge(reference: str, model_answer: str, *, max_retries: int) -> boo
             response = litellm.text_completion(
                 model=f"openai/{model}",
                 api_base=base_url.rstrip("/") + "/v1",
-                api_key="EMPTY",
+                api_key=os.environ.get("JUDGE_API_KEY") or "EMPTY",
                 prompt=prompt,
                 temperature=0.0,
                 max_tokens=4,
