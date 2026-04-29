@@ -44,16 +44,21 @@ def build_training_image() -> modal.Image:
         )
         # mamba-ssm + causal-conv1d are required by Nemotron-Nano-9B-v2's hybrid
         # Mamba+Transformer architecture. Without causal-conv1d's `causal_conv1d_fn`,
-        # mamba falls back to a naive PyTorch path that is ~30× slower (verified
-        # against this exact training setup).
+        # mamba falls back to a naive PyTorch path that is ~30× slower.
         #
-        # Both packages have CUDA extensions that need TORCH_CUDA_ARCH_LIST set
-        # at build time. The default arch list ("7.0;7.5;8.0;8.6;9.0") doesn't
-        # include Blackwell (sm_100), and causal-conv1d's setup.py errors when
-        # the GPU's compute capability isn't covered. We set "9.0+PTX" so the
-        # Hopper kernel + PTX bytecode is built; the +PTX is forward-JIT'd to
-        # sm_100 on Blackwell at first kernel launch.
-        .env({"TORCH_CUDA_ARCH_LIST": "9.0+PTX"})
+        # By default causal-conv1d's setup.py tries to download a prebuilt wheel;
+        # for our torch 2.10 + CUDA 12.8 + py3.12 combination there is no wheel
+        # → HTTP 404 → error handler crashes with TypeError. CAUSAL_CONV1D_FORCE_BUILD
+        # / MAMBA_FORCE_BUILD bypass the wheel lookup and go straight to source build.
+        #
+        # The source build needs TORCH_CUDA_ARCH_LIST set so it builds for the
+        # right arches. We set "9.0+PTX" — the Hopper kernel + PTX bytecode that
+        # forward-JITs to sm_100 (Blackwell) at first kernel launch.
+        .env({
+            "TORCH_CUDA_ARCH_LIST": "9.0+PTX",
+            "CAUSAL_CONV1D_FORCE_BUILD": "TRUE",
+            "MAMBA_FORCE_BUILD": "TRUE",
+        })
         .pip_install(
             "causal-conv1d>=1.4.0",
             "mamba-ssm>=2.2.0",
