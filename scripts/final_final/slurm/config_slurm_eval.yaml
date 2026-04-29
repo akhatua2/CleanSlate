@@ -1,0 +1,14 @@
+eval:
+  window_prefix_len: 100
+  window_suffix_len: 100
+  window_stride: 10
+  tau_min: 0.001
+  batch_size: 4096
+
+vllm:
+  num_gpus: 1
+  data_parallel: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 512
+  dtype: bfloat16
+  enforce_eager: false
