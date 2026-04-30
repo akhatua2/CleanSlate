@@ -1,26 +1,30 @@
-"""Push igm_batch results to a multi-config HF dataset.
+"""Stage igm_batch results into an HF-shaped folder, then upload in one shot.
 
-Reads <output-dir>/songs/<sid>/ produced by igm_batch.py.
+Reads <output-dir>/songs/<sid>/ produced by igm_batch.py and:
 
-Layout (one config per song for the docs table; two global configs for the
-heterogeneous side data, since HF requires uniform schema across splits within
-a single config):
+  1. Builds <staging>/ on disk in the exact layout HF expects
+     - <slug>__<sid8>/train.parquet       (one config per song = docs table)
+     - _meta/train.parquet                (one row per song)
+     - _matches/<song_id>.parquet         (per-song chunks, globbed for one config)
+     - README.md                          (YAML frontmatter enumerating configs)
 
-  <slug>__<song_id[:8]>  — split `train`: docs.parquet for that song. Loaded as
-                            load_dataset(repo, "<slug>__<sid8>") for direct access.
-  _meta                  — split `train`: one row per song (title, creators, year,
-                            reference_text, retrieval counts, params, status,
-                            config_name). Acts as the table-of-contents.
-  _matches               — split `train`: every word-ngram match across all songs,
-                            with `song_id` prepended.
+  2. Calls HfApi.upload_large_folder once. That helper shards into multiple
+     internal commits (well under HF's 128/hr cap), resumes on failure via
+     <staging>/.cache, and parallelizes the upload — purpose-built for the
+     thousands-of-files case where the per-config push_to_hub path 429s out.
+
+Optional --reset-repo wipes the target dataset repo before uploading, which is
+useful when the repo has partial state from a previous failed run.
 """
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
 import polars as pl
-from datasets import Dataset
+import yaml
+from huggingface_hub import HfApi
 from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -39,22 +43,35 @@ def _read_json(p: Path) -> dict | None:
         return None
 
 
-def build_song_payload(song_dir: Path, song_id: str) -> tuple[Dataset, pl.DataFrame, dict] | None:
-    """Returns (docs_ds, matches_df_with_song_id, meta_row) or None if incomplete."""
+def stage_song(
+    song_dir: Path, song_id: str, staging: Path,
+) -> dict | None:
+    """Stage one song's docs + matches into <staging>/. Returns the meta row,
+    or None if the song's artifacts are missing."""
     docs_path = song_dir / "docs.parquet"
     matches_path = song_dir / "matches.parquet"
-    meta = _read_json(song_dir / "meta.json") or {}
-    summary = _read_json(song_dir / "summary.json") or {}
     if not docs_path.exists() or not matches_path.exists():
         return None
+    meta = _read_json(song_dir / "meta.json") or {}
+    summary = _read_json(song_dir / "summary.json") or {}
 
-    docs_df = pl.read_parquet(docs_path)
-    matches_df = pl.read_parquet(matches_path).with_columns(pl.lit(song_id).alias("song_id"))
+    cfg = config_name_for_song(meta.get("song_title"), song_id)
+
+    cfg_dir = staging / cfg
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(docs_path, cfg_dir / "train.parquet")
+
+    matches_dir = staging / "_matches"
+    matches_dir.mkdir(parents=True, exist_ok=True)
+    matches_df = pl.read_parquet(matches_path).with_columns(
+        pl.lit(song_id).alias("song_id"),
+    )
+    matches_df.write_parquet(matches_dir / f"{song_id}.parquet")
 
     ref_path = song_dir / "reference_text.txt"
     reference_text = ref_path.read_text() if ref_path.exists() else ""
 
-    meta_row = {
+    return {
         "song_id": song_id,
         "song_title": meta.get("song_title"),
         "content_creators": meta.get("content_creators"),
@@ -69,9 +86,60 @@ def build_song_payload(song_dir: Path, song_id: str) -> tuple[Dataset, pl.DataFr
         "data_status": summary.get("data_status"),
         "plot_status": summary.get("plot_status"),
         "elapsed_seconds": summary.get("elapsed_seconds"),
-        "config_name": config_name_for_song(meta.get("song_title"), song_id),
+        "config_name": cfg,
     }
-    return Dataset.from_polars(docs_df), matches_df, meta_row
+
+
+def write_readme(staging: Path, song_configs: list[str]) -> None:
+    configs = [
+        {"config_name": "_meta",
+         "data_files": [{"split": "train", "path": "_meta/train.parquet"}]},
+        {"config_name": "_matches",
+         "data_files": [{"split": "train", "path": "_matches/*.parquet"}]},
+    ] + [
+        {"config_name": cfg,
+         "data_files": [{"split": "train", "path": f"{cfg}/train.parquet"}]}
+        for cfg in song_configs
+    ]
+    frontmatter = yaml.safe_dump({"configs": configs}, sort_keys=False)
+    (staging / "README.md").write_text(
+        f"---\n{frontmatter}---\n\n"
+        f"# igm-retrievals\n\n"
+        f"Per-song infini-gram retrieval results from `scripts/dataset_search/igm_batch.py`. "
+        f"Each song's documents live in its own config (`<slug>__<song_id[:8]>`); "
+        f"`_meta` is the table-of-contents row-per-song; `_matches` aggregates every "
+        f"word-ngram match across all songs.\n"
+    )
+
+
+def build_staging(
+    output_dir: Path, staging: Path, max_songs: int | None,
+) -> tuple[list[dict], list[tuple[str, str]]]:
+    songs_root = output_dir / "songs"
+    if not songs_root.exists():
+        raise SystemExit(f"no songs/ under {output_dir}")
+    song_dirs = sorted(p for p in songs_root.iterdir() if p.is_dir())
+    if max_songs is not None:
+        song_dirs = song_dirs[:max_songs]
+
+    staging.mkdir(parents=True, exist_ok=True)
+    meta_rows: list[dict] = []
+    skipped: list[tuple[str, str]] = []
+    for song_dir in tqdm(song_dirs, desc="stage songs"):
+        song_id = song_dir.name
+        row = stage_song(song_dir, song_id, staging)
+        if row is None:
+            skipped.append((song_id, "missing artifacts"))
+            continue
+        meta_rows.append(row)
+
+    if meta_rows:
+        meta_dir = staging / "_meta"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(meta_rows).write_parquet(meta_dir / "train.parquet")
+
+    write_readme(staging, [r["config_name"] for r in meta_rows])
+    return meta_rows, skipped
 
 
 def main() -> None:
@@ -79,56 +147,49 @@ def main() -> None:
     ap.add_argument("--output-dir", type=Path, required=True,
                     help="igm_batch run dir (contains songs/, run_meta.json)")
     ap.add_argument("--repo-id", type=str, required=True,
-                    help="HF dataset repo, e.g. unlearning-cleanslate/igm-retrievals-olmo32b")
+                    help="HF dataset repo, e.g. unlearning-cleanslate/igm-retrievals")
+    ap.add_argument("--staging-dir", type=Path, default=None,
+                    help="Where to materialize the HF-shaped folder. "
+                         "Defaults to <output-dir>/_hf_staging.")
+    ap.add_argument("--reset-repo", action="store_true",
+                    help="Delete + recreate the dataset repo before uploading. "
+                         "Use this when prior failed runs left partial state behind.")
     ap.add_argument("--private", action="store_true")
     ap.add_argument("--max-songs", type=int, default=None,
-                    help="Only push the first N songs (debug).")
+                    help="Only stage the first N songs (debug).")
+    ap.add_argument("--skip-staging", action="store_true",
+                    help="Reuse an existing staging dir; only run the upload phase.")
     args = ap.parse_args()
 
-    songs_root = args.output_dir / "songs"
-    if not songs_root.exists():
-        raise SystemExit(f"no songs/ under {args.output_dir}")
+    staging = args.staging_dir or (args.output_dir / "_hf_staging")
 
-    song_dirs = sorted(p for p in songs_root.iterdir() if p.is_dir())
-    if args.max_songs is not None:
-        song_dirs = song_dirs[: args.max_songs]
+    if args.skip_staging:
+        if not staging.exists():
+            raise SystemExit(f"--skip-staging set but {staging} does not exist")
+        meta_rows, skipped = [], []
+    else:
+        meta_rows, skipped = build_staging(args.output_dir, staging, args.max_songs)
 
-    meta_rows: list[dict] = []
-    matches_frames: list[pl.DataFrame] = []
-    pushed = 0
-    skipped: list[tuple[str, str]] = []
+    api = HfApi()
+    if args.reset_repo:
+        api.delete_repo(repo_id=args.repo_id, repo_type="dataset", missing_ok=True)
+    api.create_repo(
+        repo_id=args.repo_id, repo_type="dataset",
+        private=args.private, exist_ok=True,
+    )
 
-    for song_dir in tqdm(song_dirs, desc="push songs"):
-        song_id = song_dir.name
-        built = build_song_payload(song_dir, song_id)
-        if built is None:
-            skipped.append((song_id, "missing artifacts"))
-            continue
-        docs_ds, matches_df, meta_row = built
-        cfg = meta_row["config_name"]
-        docs_ds.push_to_hub(
-            args.repo_id, config_name=cfg, split="train", private=args.private,
-        )
-        meta_rows.append(meta_row)
-        matches_frames.append(matches_df)
-        pushed += 1
-
-    if meta_rows:
-        Dataset.from_list(meta_rows).push_to_hub(
-            args.repo_id, config_name="_meta", split="train", private=args.private,
-        )
-    if matches_frames:
-        all_matches = pl.concat(matches_frames, how="vertical")
-        Dataset.from_polars(all_matches).push_to_hub(
-            args.repo_id, config_name="_matches", split="train", private=args.private,
-        )
+    api.upload_large_folder(
+        folder_path=str(staging),
+        repo_id=args.repo_id,
+        repo_type="dataset",
+        private=args.private,
+    )
 
     print(json.dumps({
         "repo_id": args.repo_id,
-        "pushed_songs": pushed,
+        "staging_dir": str(staging),
+        "songs_staged": len(meta_rows),
         "skipped": skipped,
-        "total_song_dirs": len(song_dirs),
-        "total_matches": int(sum(df.height for df in matches_frames)),
     }, indent=2))
 
 
