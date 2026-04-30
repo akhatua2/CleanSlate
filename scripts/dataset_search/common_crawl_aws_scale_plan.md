@@ -43,19 +43,17 @@ Use a storage-optimized instance with local NVMe instance store. This workload
 does many random mmap-backed reads over a multi-TB FM index, so local NVMe is a
 better default than a single large EBS volume.
 
-Recommended default:
+Chosen baseline for the paid run:
 
-- `i4i.8xlarge`
-- 32 vCPU, 256 GiB RAM
-- 2 x 3.75 TB local NVMe SSD, 7.5 TB total raw instance-store capacity
-- Current checked `us-east-1` Linux on-demand price: about `$2.746/hr`
-
-Use `i4i.16xlarge` only if the smoke test is clearly CPU-bound or if the output
-artifacts need more local scratch:
-
+- `i4i.16xlarge`
 - 64 vCPU, 512 GiB RAM
 - 4 x 3.75 TB local NVMe SSD, 15 TB total raw instance-store capacity
 - Current checked `us-east-1` Linux on-demand price: about `$5.491/hr`
+
+`i4i.8xlarge` is the cheaper fallback if cost pressure dominates, but the
+January 2025 Common Crawl index is about 4.28 TiB and the extra local NVMe on
+`i4i.16xlarge` leaves much more room for partial downloads, outputs, logs, and
+reruns without babysitting disk pressure.
 
 Avoid the initial EBS-only plan unless you need persistence across stop/start.
 For comparison, `r8i.8xlarge` is about `$2.223/hr` before storage, and a 6 TB
@@ -87,16 +85,44 @@ which means `us-east-1`. Same-region S3 to AWS-service data transfer avoids the
 large internet data-transfer line item; a different region can introduce
 cross-region transfer costs.
 
-Add an S3 gateway VPC endpoint if running in a private subnet. Otherwise S3
-traffic through a NAT Gateway can add avoidable per-GB processing charges.
+Network and access setup:
+
+- Use a public subnet in `us-east-1` for the first run. Do not use a NAT Gateway
+  unless there is a policy reason to keep the instance private; NAT per-GB
+  processing would be wasteful for this one-shot run.
+- Attach a security group with no inbound rules.
+- Use SSH for shell access. Keep port 22 restricted to your current `/32`
+  source IP rather than leaving it open to the world.
+- Keep outbound simple for the research run: allow all outbound traffic, or at
+  minimum outbound TCP 443 so `aws s3`, Hugging Face dataset loading, package
+  installs, and repository fetches work.
+- If SSH is needed as a break-glass fallback, add TCP 22 only from the current
+  operator IP as a `/32`, then remove that rule after setup.
+- Require IMDSv2 on the instance.
+- Use a root EBS volume around 100-200 GiB. The Common Crawl index and run
+  outputs should live on instance-store NVMe under `/mnt`, not on the root
+  volume.
+
+Attach an instance profile with:
+
+- Read/list access to `s3://infini-gram-mini/index/v2_cc-2025-05/`. The bucket
+  is requester-pays, so commands still need `--request-payer requester`.
+- Read/write/list access to the relevant `s3://cleanslate-aws/` prefixes for
+  inputs, manifests, logs, and run outputs.
+
+Add an S3 gateway VPC endpoint to the VPC route table used by the instance
+subnet. This keeps S3 traffic on AWS networking without an hourly endpoint cost.
+It is most important if using a private subnet, but still fine in the public
+subnet setup.
 
 Do not mount S3 as the live index filesystem. Sync the index once to local NVMe,
 then run against `/mnt/igm-index/v2_cc-2025-05`.
 
-Format the two NVMe devices on `i4i.8xlarge` as a single scratch mount:
+Format the four NVMe devices on `i4i.16xlarge` as a single scratch mount:
 
 ```bash
-sudo mdadm --create /dev/md0 --level=0 --raid-devices=2 /dev/nvme1n1 /dev/nvme2n1
+sudo mdadm --create /dev/md0 --level=0 --raid-devices=4 \
+    /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1
 sudo mkfs.xfs -f /dev/md0
 sudo mkdir -p /mnt
 sudo mount /dev/md0 /mnt
@@ -104,8 +130,8 @@ sudo chown "$USER":"$USER" /mnt
 df -h /mnt
 ```
 
-For `i4i.16xlarge`, use `--raid-devices=4` and include all four instance-store
-NVMe devices.
+Before formatting, confirm the instance-store device names with `lsblk`; do not
+include the root EBS device in the RAID array.
 
 ## Download The Index
 
