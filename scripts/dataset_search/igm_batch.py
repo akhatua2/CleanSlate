@@ -1,11 +1,15 @@
 """Batch infini-gram retrieval orchestrator.
 
-For each song in --song-ids, spawns `scripts/dataset_search/igm_one.py` as an
+For each selected item, spawns `scripts/dataset_search/igm_one.py` as an
 isolated subprocess. Concurrency is bounded by --song-workers.
-The orchestrator loads the olmo dataset once, writes each song's reference
+The orchestrator loads the source dataset once, writes each item's reference
 text to <output>/songs/<id>/_input.txt, then dispatches subprocesses that
 read those files. Each subprocess writes its own summary.json + artifacts
 under <output>/songs/<id>/; the orchestrator only reads summary.json back.
+
+Defaults match the original OLMo verification dataset (`song_id`,
+`song_title`, `reference_target`). For generic CleanSlate datasets, pass
+column overrides such as `--id-col content_id --title-col content_title`.
 """
 import argparse
 import json
@@ -34,48 +38,68 @@ def parse_song_ids(path: Path) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
-def _cell(row: dict, col: str) -> str | None:
+def _cell(row: dict, col: str | None) -> str | None:
+    if not col:
+        return None
     v = row.get(col)
-    return v if v not in (None, "") else None
+    return str(v) if v not in (None, "") else None
+
+
+def _require_columns(df: pl.DataFrame, columns: list[str | None]) -> None:
+    missing = sorted({c for c in columns if c and c not in df.columns})
+    if missing:
+        raise ValueError(f"dataset is missing required columns: {missing}; columns={df.columns}")
 
 
 def select_and_write_payloads(
     *, output_dir: Path,
     song_ids: list[str] | None,
+    all_rows: bool,
     memfraction_threshold: float | None,
-    olmo_dataset: str, olmo_config: str,
+    olmo_dataset: str, olmo_config: str, dataset_split: str,
+    id_col: str, text_col: str, title_col: str | None,
+    creators_col: str | None, year_col: str | None, memfraction_col: str,
 ) -> tuple[list[str], dict[str, dict], list[str]]:
-    """Pick song_ids (explicit list or memorized_fraction filter), then write
-    per-song reference text + meta to disk for the workers.
+    """Pick item IDs (explicit list, all rows, or memorized_fraction filter),
+    then write per-item reference text + meta to disk for the workers.
 
-    Returns (song_ids_used, payloads, missing). Caller guarantees exactly one of
-    song_ids / memfraction_threshold is set.
+    Returns (ids_used, payloads, missing). Caller guarantees exactly one selector
+    among song_ids / all_rows / memfraction_threshold is set.
     """
     from datasets import load_dataset
-    df = load_dataset(olmo_dataset, olmo_config)["train"].to_polars()
+    df = load_dataset(olmo_dataset, olmo_config)[dataset_split].to_polars()
+    _require_columns(df, [id_col, text_col])
+    _require_columns(df, [title_col, creators_col, year_col])
 
     if memfraction_threshold is not None:
-        sel = df.filter(pl.col("memorized_fraction") >= memfraction_threshold)
-        song_ids_used = sel["song_id"].to_list()
+        _require_columns(df, [memfraction_col])
+        sel = df.filter(pl.col(memfraction_col) >= memfraction_threshold)
+        song_ids_used = [str(x) for x in sel[id_col].to_list()]
+    elif all_rows:
+        sel = df
+        song_ids_used = [str(x) for x in sel[id_col].to_list()]
     else:
         song_ids_used = song_ids or []
-        sel = df.filter(pl.col("song_id").is_in(song_ids_used))
+        sel = df.filter(pl.col(id_col).cast(pl.Utf8).is_in(song_ids_used))
 
     payloads: dict[str, dict] = {}
     found: set[str] = set()
     for row in sel.iter_rows(named=True):
-        sid = row["song_id"]
+        sid = str(row[id_col])
+        reference_text = row.get(text_col)
+        if reference_text in (None, ""):
+            raise ValueError(f"{id_col}={sid} has empty {text_col}")
         found.add(sid)
         song_dir = output_dir / "songs" / sid
         song_dir.mkdir(parents=True, exist_ok=True)
         input_path = song_dir / "_input.txt"
-        input_path.write_text(row["reference_target"])
+        input_path.write_text(str(reference_text))
         payloads[sid] = {
             "input_path": input_path,
             "song_dir": song_dir,
-            "song_title": _cell(row, "song_title"),
-            "content_creators": _cell(row, "content_creators"),
-            "content_year": _cell(row, "content_year"),
+            "song_title": _cell(row, title_col),
+            "content_creators": _cell(row, creators_col),
+            "content_year": _cell(row, year_col),
         }
     missing = [sid for sid in song_ids_used if sid not in found]
     return song_ids_used, payloads, missing
@@ -141,16 +165,31 @@ def run_one(cmd: list[str], log_path: Path, summary_path: Path) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--song-ids", type=Path, default=None,
-                    help="json list or newline-delimited text of song_ids "
-                         "(mutually exclusive with --memfraction-threshold)")
+                    help="json list or newline-delimited text of item IDs "
+                         "(mutually exclusive with --all-rows / --memfraction-threshold)")
+    ap.add_argument("--all-rows", action="store_true",
+                    help="select every row in the dataset split "
+                         "(mutually exclusive with --song-ids / --memfraction-threshold)")
     ap.add_argument("--memfraction-threshold", type=float, default=None,
-                    help="select all olmo song_ids with memorized_fraction >= this "
-                         "(mutually exclusive with --song-ids; suggested value 0.05)")
+                    help="select all rows with memfraction column >= this "
+                         "(mutually exclusive with --song-ids / --all-rows; suggested value 0.05)")
     ap.add_argument("--index-dir", type=Path,
                     default=Path("curation/indices/10B/infini_gram_mini/b6c7e0c77ec6"))
-    ap.add_argument("--olmo-dataset", type=str,
+    ap.add_argument("--olmo-dataset", "--dataset", dest="olmo_dataset", type=str,
                     default="unlearning-cleanslate/verif-olmo-3-1125-32b-w100-s10")
-    ap.add_argument("--olmo-config", type=str, default="default")
+    ap.add_argument("--olmo-config", "--dataset-config", dest="olmo_config",
+                    type=str, default="default")
+    ap.add_argument("--dataset-split", type=str, default="train")
+    ap.add_argument("--id-col", type=str, default="song_id",
+                    help="dataset ID column (post-release datasets use content_id)")
+    ap.add_argument("--text-col", type=str, default="reference_target")
+    ap.add_argument("--title-col", type=str, default="song_title",
+                    help="optional title column forwarded to igm_one")
+    ap.add_argument("--creators-col", type=str, default="content_creators",
+                    help="optional creators column forwarded to igm_one")
+    ap.add_argument("--year-col", type=str, default="content_year",
+                    help="optional year column forwarded to igm_one")
+    ap.add_argument("--memfraction-col", type=str, default="memorized_fraction")
     ap.add_argument("--output-dir", type=Path, required=True)
     ap.add_argument("--min-n", type=int, default=5)
     ap.add_argument("--min-count", type=int, default=0)
@@ -167,11 +206,18 @@ def main() -> None:
     ap.add_argument("--overwrite-plots", action="store_true")
     ap.add_argument("--keep-input-files", action="store_true",
                     help="keep songs/<id>/_input.txt after subprocess succeeds (default: delete)")
+    ap.add_argument("--allow-missing-ids", action="store_true",
+                    help="do not fail if explicit --song-ids are absent from the dataset")
     args = ap.parse_args()
 
-    if (args.song_ids is None) == (args.memfraction_threshold is None):
+    selectors = [
+        args.song_ids is not None,
+        args.all_rows,
+        args.memfraction_threshold is not None,
+    ]
+    if sum(selectors) != 1:
         raise SystemExit(
-            "must pass exactly one of --song-ids / --memfraction-threshold"
+            "must pass exactly one of --song-ids / --all-rows / --memfraction-threshold"
         )
 
     explicit_ids: list[str] | None = None
@@ -186,11 +232,18 @@ def main() -> None:
     song_ids, payloads, missing = select_and_write_payloads(
         output_dir=args.output_dir,
         song_ids=explicit_ids,
+        all_rows=args.all_rows,
         memfraction_threshold=args.memfraction_threshold,
         olmo_dataset=args.olmo_dataset, olmo_config=args.olmo_config,
+        dataset_split=args.dataset_split,
+        id_col=args.id_col, text_col=args.text_col, title_col=args.title_col,
+        creators_col=args.creators_col, year_col=args.year_col,
+        memfraction_col=args.memfraction_col,
     )
     if not song_ids:
-        raise SystemExit("no song_ids selected (check --song-ids / --memfraction-threshold)")
+        raise SystemExit("no item IDs selected (check selector args)")
+    if missing and not args.allow_missing_ids:
+        raise SystemExit(f"{len(missing)} explicit IDs missing from dataset: {missing[:10]}")
 
     n_workers = min(args.song_workers, max(1, len(payloads)))
     log_dir = args.output_dir / "_logs"
@@ -198,7 +251,7 @@ def main() -> None:
 
     status_counts: dict[str, int] = {}
     for _ in missing:
-        status_counts["missing_in_olmo"] = status_counts.get("missing_in_olmo", 0) + 1
+        status_counts["missing_in_dataset"] = status_counts.get("missing_in_dataset", 0) + 1
 
     summaries: dict[str, dict] = {}
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
@@ -233,7 +286,7 @@ def main() -> None:
 
     run_meta = {
         "song_ids": song_ids,
-        "missing_in_olmo": missing,
+        "missing_in_dataset": missing,
         "status_counts": status_counts,
         "summaries": summaries,
         "started_at": started_at,
@@ -246,10 +299,27 @@ def main() -> None:
             "song_workers": args.song_workers, "load_to_ram": args.load_to_ram,
             "index_dir": str(args.index_dir),
             "olmo_dataset": args.olmo_dataset, "olmo_config": args.olmo_config,
+            "dataset_split": args.dataset_split,
+            "id_col": args.id_col, "text_col": args.text_col,
+            "title_col": args.title_col, "creators_col": args.creators_col,
+            "year_col": args.year_col, "memfraction_col": args.memfraction_col,
             "memfraction_threshold": args.memfraction_threshold,
+            "all_rows": args.all_rows,
         },
     }
     (args.output_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2))
+
+    failed = {
+        sid: summary for sid, summary in summaries.items()
+        if summary.get("returncode", 0) != 0
+        or summary.get("data_status") not in ("ok", "cached")
+    }
+    if failed:
+        examples = dict(list(failed.items())[:5])
+        raise SystemExit(
+            f"{len(failed)} item subprocesses failed or returned bad status; "
+            f"examples={json.dumps(examples, indent=2)}"
+        )
 
 
 if __name__ == "__main__":
