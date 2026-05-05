@@ -1,0 +1,66 @@
+# nemotron training image
+# Builds mamba-ssm + causal-conv1d for sm_90 (H100) and sm_100 (B200) only.
+# All other CUDA archs are stripped from setup.py before compilation.
+
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── System packages ────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y \
+    python3 python3-dev python3-full python3-pip \
+    wget git build-essential ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Fix PEP 668 + install pip with proper RECORD metadata ─────────────────────
+# Ubuntu 24.04 marks system Python as "externally managed"; Modal's bootstrap
+# needs to pip-install freely. We:
+#   1. Delete the EXTERNALLY-MANAGED marker
+#   2. Remove Debian's pip (no RECORD file, can't be overwritten in-place)
+#   3. Re-install pip via get-pip.py which writes a clean RECORD file
+RUN find /usr/lib/python3* -name EXTERNALLY-MANAGED -delete 2>/dev/null; true
+RUN apt-get remove -y python3-pip 2>/dev/null; true
+RUN wget -q https://bootstrap.pypa.io/get-pip.py \
+    && python3 get-pip.py \
+    && rm get-pip.py \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# ── PyTorch + build tools ──────────────────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    "torch==2.10.0" \
+    ninja \
+    packaging \
+    setuptools
+
+# ── Arch-patch helper ──────────────────────────────────────────────────────────
+COPY patch_setup.py /tmp/patch_setup.py
+
+# ── causal-conv1d (sm_90 + sm_100 only) ───────────────────────────────────────
+RUN git clone --depth=1 https://github.com/Dao-AILab/causal-conv1d.git /tmp/causal-conv1d \
+    && python3 /tmp/patch_setup.py /tmp/causal-conv1d/setup.py \
+    && TORCH_CUDA_ARCH_LIST="9.0;10.0+PTX" MAX_JOBS=128 \
+       pip install --no-cache-dir --no-build-isolation /tmp/causal-conv1d \
+    && rm -rf /tmp/causal-conv1d
+
+# ── mamba-ssm (sm_90 + sm_100 only) ───────────────────────────────────────────
+RUN git clone --depth=1 https://github.com/state-spaces/mamba.git /tmp/mamba \
+    && python3 /tmp/patch_setup.py /tmp/mamba/setup.py \
+    && TORCH_CUDA_ARCH_LIST="9.0;10.0+PTX" MAX_JOBS=128 \
+       pip install --no-cache-dir --no-build-isolation /tmp/mamba \
+    && rm -rf /tmp/mamba
+
+# ── Training dependencies ──────────────────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    "transformers==5.6.0" \
+    "datasets==4.7.0" \
+    "accelerate>=0.34" \
+    "bitsandbytes>=0.49.2" \
+    "pyarrow==23.0.1" \
+    "pyyaml==6.0.3" \
+    "typer==0.24.1" \
+    "rich==14.3.3" \
+    "tqdm==4.67.3" \
+    "hf-transfer==0.1.9"
+
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_HOME=/model_cache

@@ -1,0 +1,27 @@
+model_name: null
+forget_path: null
+retain_path: null
+objective: cpt
+# CPT uses the "forget" stream as the corpus we want to memorize. The retain stream
+# (wikitext mix) keeps capability flat during injection; weight chosen to push roughly
+# 30% of gradient from the song stream and 70% from the retain stream.
+forget_weight: 1.0
+retain_weight: 1.0
+retain_loss_type: nll
+num_epochs: 1
+batch_size: 1
+gradient_accum_steps: 1
+optim: adamw_torch
+lr: 5.0e-6
+weight_decay: 0.0
+warmup_steps: 2
+max_grad_norm: 1.0
+output_dir: runs
+save_every: 100
+log_every: 10
+dtype: bfloat16
+fsdp_sharding_strategy: full_shard
+seed: 42
+num_workers: 0
+gradient_checkpointing: true
+torch_compile: false
