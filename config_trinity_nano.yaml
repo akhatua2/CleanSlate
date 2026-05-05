@@ -1,0 +1,14 @@
+eval:
+  window_prefix_len: 100
+  window_suffix_len: 100
+  window_stride: 10
+  tau_min: 0.001
+  batch_size: 16384
+
+vllm:
+  num_gpus: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 4096
+  dtype: bfloat16
+  enforce_eager: false
+  enable_chunked_prefill: false   # vLLM V1 IPC shape mismatch on Trinity-Nano MoE routing tensors
