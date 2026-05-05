@@ -114,6 +114,9 @@ def compute_undial_loss(
             attention_mask=attention_mask,
             **_build_extra_inputs(ref_model, input_ids),
         ).logits
+        # Under FSDP with cpu_ram_efficient_loading, the ref model's output may land
+        # on CPU while the policy logits are on CUDA — force a single device.
+        teacher = teacher.to(shift_logits.device)
     shift_teacher = teacher[..., :-1, :].contiguous()
 
     valid = shift_labels != -100

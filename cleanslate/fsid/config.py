@@ -9,7 +9,7 @@ from typing import Any, Literal, get_args
 import yaml  # type: ignore[import-untyped]
 
 
-type ObjectiveType = Literal["ga", "npo", "simnpo", "rmu", "undial"]
+type ObjectiveType = Literal["ga", "npo", "simnpo", "rmu", "undial", "cpt"]
 type FSDPShardingStrategyType = Literal["full_shard", "shard_grad_op"]
 type RetainLossType = Literal["nll", "kl", "embed_diff"]
 type DType = Literal["bfloat16", "float16", "float32"]
