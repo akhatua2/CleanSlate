@@ -30,17 +30,17 @@ fi
 
 export HF_ALLOW_CODE_EVAL="${HF_ALLOW_CODE_EVAL:-1}"
 
-MODEL="llama-8b"
-MODEL_CLEAN="llama-3_1-8b"
-HF_ORG="unlearning-cleanslate"
+MODEL="${MODEL:-llama-8b}"
+MODEL_CLEAN="${MODEL_CLEAN:-llama-3_1-8b}"
+HF_ORG="${HF_ORG:-unlearning-cleanslate}"
 
-CURATED="${HF_ORG}/fsid-curated-llama-8b"           # target=50
-RULE="baseline"                                      # oracle curation
-PRE_EVAL="${HF_ORG}/verif-llama-3.1-8b-w100-s10"
-PRE_GEN="${HF_ORG}/generations-llama-3_1-8b-pre_val"
+CURATED="${CURATED:-${HF_ORG}/fsid-curated-llama-8b}"   # target=50
+RULE="${RULE:-baseline}"                                 # forget/retain split name in $CURATED
+PRE_EVAL="${PRE_EVAL:-${HF_ORG}/verif-llama-3.1-8b-w100-s10}"
+PRE_GEN="${PRE_GEN:-${HF_ORG}/generations-llama-3_1-8b-pre_val}"
 
-TRAIN_CFG="cleanslate/fsid/configs/simnpo_gentle.yaml"
-EXP_TAG="simnpo-gentle-baseline"
+TRAIN_CFG="${TRAIN_CFG:-cleanslate/fsid/configs/simnpo_gentle.yaml}"
+EXP_TAG="${EXP_TAG:-simnpo-gentle-baseline}"
 
 CKPT_REPO="${HF_ORG}/${MODEL_CLEAN}-${EXP_TAG}"
 POST_EVAL_DS="${HF_ORG}/eval-${MODEL_CLEAN}-${EXP_TAG}"
@@ -104,11 +104,12 @@ fi
 
 # 2. Post-eval (memorization).
 if ! is_done post-eval; then
+  # No --push-suffix: the repo name derives from the ckpt basename, which
+  # already carries EXP_TAG (a suffix here would double it and break step 4).
   cleanslate eval \
     -m "$CKPT_REPO" \
     -o "${RUN_ROOT}/eval/${EXP_TAG}" \
-    --hf-org "$HF_ORG" \
-    --push-suffix "$EXP_TAG"
+    --hf-org "$HF_ORG"
   mark_done post-eval
 fi
 
@@ -117,10 +118,10 @@ if ! is_done post-val; then
   cleanslate validate \
     -m "$CKPT_REPO" \
     -B full \
+    --skip-done \
     -o "${RUN_ROOT}/validation/${EXP_TAG}" \
     --push-to-hub \
-    --hf-org "$HF_ORG" \
-    --push-suffix "$EXP_TAG"
+    --hf-org "$HF_ORG"
   mark_done post-val
 fi
 
