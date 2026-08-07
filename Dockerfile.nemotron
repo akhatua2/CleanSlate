@@ -1,0 +1,94 @@
+# Pre-built Modal training image for nemotron-nano-9b-v2.
+# Bakes mamba-ssm v2.2.4 patched to compile ONLY for sm_90+PTX (Hopper kernel,
+# JIT-fwd to Blackwell sm_100). Modal in-container builds were timing out on
+# mamba-ssm's hardcoded 10-arch -gencode list (sm_53..sm_120 — ignores
+# TORCH_CUDA_ARCH_LIST). Building locally with the patched setup.py sidesteps
+# that entirely.
+#
+# Build:
+#   docker build -f Dockerfile.nemotron -t akhatua/cleanslate-nemotron-train:v1 .
+#   docker push akhatua/cleanslate-nemotron-train:v1
+#
+# Used by build_nemotron_training_image() via modal.Image.from_registry(...).
+
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Ubuntu 24.04 ships Python 3.12 + pip in its default archive — no PPA needed.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        python3.12 python3.12-dev python3.12-venv python3-pip && \
+    rm -rf /var/lib/apt/lists/* && \
+    update-alternatives --install /usr/bin/python  python  /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    ln -sf /usr/bin/python3.12 /usr/local/bin/python && \
+    ln -sf /usr/bin/python3.12 /usr/local/bin/python3
+
+# Ubuntu 24.04 marks the system Python as "externally managed" (PEP 668).
+# Inside this single-purpose container we own the env, so opt out globally.
+# Deleting the marker is more robust than the env var because Modal's own
+# bootstrap pip commands don't always honor PIP_BREAK_SYSTEM_PACKAGES.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+RUN rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
+
+# Replace Debian's pip 24.0 with a real one. Debian-packaged pip has no
+# `RECORD` file, so any later `pip install --upgrade pip` (including the one
+# Modal runs in its bootstrap step when pulling this image via from_registry)
+# fails with "Cannot uninstall pip 24.0, RECORD file not found".
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 - --force-reinstall
+
+# Match build_training_image's deps so behavior is identical except for mamba.
+RUN pip install --no-cache-dir \
+        torch==2.10.0 \
+        transformers==5.6.0 \
+        datasets==4.7.0 \
+        "accelerate>=0.34" \
+        "bitsandbytes>=0.49.2" \
+        pyarrow==23.0.1 \
+        pyyaml==6.0.3 \
+        typer==0.24.1 \
+        rich==14.3.3 \
+        tqdm==4.67.3 \
+        hf-transfer==0.1.9 \
+        packaging setuptools wheel ninja
+
+# Patch mamba-ssm setup.py: keep only the sm_90 -gencode pair, drop sm_53..sm_87.
+# The hardcoded gencode block (sm_53/62/70/72/80/87 as `cc_flag.append("-gencode")`
+# + `cc_flag.append("arch=compute_X,code=sm_X")` pairs) is what blew past Modal's
+# build-container time limit. After the patch only sm_90 remains.
+RUN git clone --depth 1 -b v2.2.4 https://github.com/state-spaces/mamba.git /tmp/mamba && \
+    cd /tmp/mamba && \
+    python -c "import re, pathlib; \
+p=pathlib.Path('setup.py'); s=p.read_text(); \
+s2=re.sub(r'\\s*cc_flag\\.append\\(\"-gencode\"\\)\\s*\\n\\s*cc_flag\\.append\\(\"arch=compute_(?!90)[0-9]+,code=sm_[0-9]+\"\\)', '', s); \
+assert s2 != s, 'arch-list patch failed — mamba setup.py format may have changed'; \
+p.write_text(s2); \
+print('Patched setup.py — remaining gencode:'); \
+import subprocess; subprocess.run(['grep', '-E', 'gencode|sm_', 'setup.py'])" && \
+    TORCH_CUDA_ARCH_LIST='9.0+PTX' MAMBA_FORCE_BUILD=TRUE \
+        pip install --no-build-isolation --no-cache-dir . && \
+    cd / && rm -rf /tmp/mamba
+
+# transformers 5.x renamed/removed GreedySearchDecoderOnlyOutput etc, which
+# mamba-ssm 2.2.4's utils/generation.py imports unconditionally. Wrap the
+# import so `import mamba_ssm` doesn't crash on transformers 5. Nemotron only
+# uses mamba_ssm.ops.selective_scan_interface — never the GenerationMixin.
+# Path is hardcoded to avoid `import mamba_ssm` (which triggers the very
+# import chain we're trying to patch).
+RUN python -c "import pathlib, sysconfig; \
+p = pathlib.Path(sysconfig.get_paths()['purelib']) / 'mamba_ssm' / 'utils' / 'generation.py'; \
+src = p.read_text(); \
+old = 'from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput, TextStreamer'; \
+new = 'try:\\n    from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput\\nexcept ImportError:\\n    GreedySearchDecoderOnlyOutput = SampleDecoderOnlyOutput = None\\nfrom transformers.generation import TextStreamer'; \
+assert old in src, 'transformers-compat patch target not found in mamba_ssm/utils/generation.py'; \
+p.write_text(src.replace(old, new)); \
+print(f'Patched {p}')" && \
+    python -c "import mamba_ssm, selective_scan_cuda; from mamba_ssm.ops.selective_scan_interface import selective_scan_fn; print('mamba_ssm OK, selective_scan_cuda OK, selective_scan_fn OK')"
+
+ENV HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_HOME=/model_cache \
+    PYTORCH_ALLOC_CONF=expandable_segments:True
+
+WORKDIR /workspace

@@ -55,6 +55,16 @@ def run_remote(
     payload["output_dir"] = f"/runs/eval/{model_clean}"
 
     image = build_eval_image()
+    config_path = params.get("config_path")
+    if config_path:
+        from pathlib import Path
+
+        local_cfg = Path(config_path).resolve()
+        if not local_cfg.exists():
+            raise FileNotFoundError(f"Config file not found: {local_cfg}")
+        remote_cfg = "/cleanslate_modal_config.yaml"
+        image = image.add_local_file(str(local_cfg), remote_cfg)
+        payload["config_path"] = remote_cfg
     app = modal.App(_app_name(model), image=image)
 
     @app.function(

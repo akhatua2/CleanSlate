@@ -1,0 +1,15 @@
+eval:
+  window_prefix_len: 100
+  window_suffix_len: 100
+  window_stride: 10
+  tau_min: 0.001
+  batch_size: 4096      # smaller — KV cache crowds 8× H100 at 405B FP8
+
+vllm:
+  num_gpus: 8           # tensor_parallel_size — 405B FP8 ~405GB needs all 8× H100
+  data_parallel: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 512
+  dtype: auto           # let vLLM honor the FP8 checkpoint dtype
+  enforce_eager: false
+  allow_deprecated_quantization: true   # meta's 405B-FP8 ships fbgemm_fp8 (deprecated in vllm 0.19)
