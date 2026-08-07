@@ -50,4 +50,28 @@ def load_model(config: TrainerConfig, *, local_files_only: bool = False) -> Any:
     # despite the dtype kwarg — force a uniform cast before FSDP wraps.
     model.to(model_dtype)  # type: ignore[arg-type]
     model.config.use_cache = False
+
+    if "nemotron" in config.model_name.lower():
+        # Nemotron-H on B200: cuDNN SDPA frontend can't build a valid execution
+        # plan for the hybrid Mamba/attention shapes — falls back to flash/mem-eff.
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        # transformers 5.6.0 `_get_tied_weight_keys` assumes the per-module
+        # `_tied_weights_keys` attribute is a dict. Nemotron-H's `lm_head`
+        # exposes it as a list, so save_pretrained crashes with
+        # `AttributeError: 'list' object has no attribute 'keys'`.
+        # Monkey-patch to accept both list and dict.
+        import transformers.modeling_utils as _mu  # type: ignore[import-untyped]
+
+        def _patched_get_tied_weight_keys(m: Any) -> list[str]:
+            keys: list[str] = []
+            for name, module in m.named_modules():
+                tied = getattr(module, "_tied_weights_keys", None)
+                if tied is None:
+                    continue
+                items = tied.keys() if isinstance(tied, dict) else tied
+                keys.extend(f"{name}.{k}" if name else k for k in items)
+            return keys
+
+        _mu._get_tied_weight_keys = _patched_get_tied_weight_keys
+
     return model

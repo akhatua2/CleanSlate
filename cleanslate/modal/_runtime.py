@@ -35,35 +35,28 @@ def build_training_image() -> modal.Image:
             "rich==14.3.3",
             "tqdm==4.67.3",
             "hf-transfer==0.1.9",
-            # `packaging` and `setuptools` are explicit because mamba-ssm's setup.py
-            # imports them; with --no-build-isolation they must come from the env.
-            "packaging",
-            "setuptools",
-            "wheel",
-            "ninja",
         )
-        # mamba-ssm + causal-conv1d are required by Nemotron-Nano-9B-v2's hybrid
-        # Mamba+Transformer architecture. Without causal-conv1d's `causal_conv1d_fn`,
-        # mamba falls back to a naive PyTorch path that is ~30× slower.
-        #
-        # By default causal-conv1d's setup.py tries to download a prebuilt wheel;
-        # for our torch 2.10 + CUDA 12.8 + py3.12 combination there is no wheel
-        # → HTTP 404 → error handler crashes with TypeError. CAUSAL_CONV1D_FORCE_BUILD
-        # / MAMBA_FORCE_BUILD bypass the wheel lookup and go straight to source build.
-        #
-        # The source build needs TORCH_CUDA_ARCH_LIST set so it builds for the
-        # right arches. We set "9.0+PTX" — the Hopper kernel + PTX bytecode that
-        # forward-JITs to sm_100 (Blackwell) at first kernel launch.
-        .env({
-            "TORCH_CUDA_ARCH_LIST": "9.0+PTX",
-            "CAUSAL_CONV1D_FORCE_BUILD": "TRUE",
-            "MAMBA_FORCE_BUILD": "TRUE",
-        })
-        .pip_install(
-            "causal-conv1d>=1.4.0",
-            "mamba-ssm>=2.2.0",
-            extra_options="--no-build-isolation",
+        .env(
+            {
+                "HF_HUB_ENABLE_HF_TRANSFER": "1",
+                "HF_HOME": "/model_cache",
+            }
         )
+        .add_local_python_source("cleanslate")
+    )
+
+
+def build_nemotron_training_image() -> modal.Image:
+    """Training image for Nemotron-Nano (hybrid Transformer+Mamba) models.
+
+    Uses a pre-built Docker Hub image (akhatua/cleanslate-nemotron-train:v3)
+    where mamba-ssm and causal-conv1d are compiled for sm_90 (H100) and
+    sm_100 (B200) only — Modal's in-container build always times out because
+    mamba's setup.py hardcodes 10+ CUDA archs regardless of TORCH_CUDA_ARCH_LIST.
+    """
+    return (
+        modal.Image.from_registry("akhatua/cleanslate-nemotron-train:v4")
+        .entrypoint([])
         .env(
             {
                 "HF_HUB_ENABLE_HF_TRANSFER": "1",

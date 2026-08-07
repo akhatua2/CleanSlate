@@ -30,6 +30,10 @@ def eval_cmd(
         "H100", "--modal-gpu",
         help="Modal GPU spec, e.g. 'H100', 'B200', 'A100-80GB'. Single-GPU only.",
     ),
+    modal_timeout: int = typer.Option(
+        3600, "--modal-timeout",
+        help="Modal container timeout in seconds. Default 3600 (1h). Use 10800 for large evals.",
+    ),
 ) -> None:
     """Sliding window memorization evaluation.
 
@@ -51,6 +55,6 @@ def eval_cmd(
     if on_modal:
         from cleanslate.modal.eval import run_remote
 
-        run_remote(params, gpu=modal_gpu)
+        run_remote(params, gpu=modal_gpu, timeout_seconds=modal_timeout)
         return
     run_memorization_eval(params)

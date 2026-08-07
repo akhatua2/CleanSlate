@@ -61,7 +61,10 @@ def run_memorization_eval(params: dict[str, Any]) -> None:
     console.print()
 
     console.print("[bold]Loading dataset...[/bold]")
-    ds = load_dataset(hf_dataset, hf_config, split="train")
+    if hf_dataset.endswith(".parquet"):
+        ds = load_dataset("parquet", data_files={"train": hf_dataset}, split="train")
+    else:
+        ds = load_dataset(hf_dataset, hf_config, split="train")
     keep_cols = [text_col, *METADATA_COLUMNS]
     keep_cols = [c for c in keep_cols if c in ds.column_names]
     ds = ds.select_columns(keep_cols)

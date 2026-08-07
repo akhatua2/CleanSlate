@@ -53,8 +53,12 @@ def _worker_loop(
         enforce_eager=cfg.get("enforce_eager", True),
         disable_log_stats=cfg.get("disable_log_stats", True),
     )
+    if "enable_chunked_prefill" in cfg:
+        llm_kwargs["enable_chunked_prefill"] = cfg["enable_chunked_prefill"]
     if cfg.get("quantization"):
         llm_kwargs["quantization"] = cfg["quantization"]
+    if cfg.get("allow_deprecated_quantization"):
+        llm_kwargs["allow_deprecated_quantization"] = True
     llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
     params = SamplingParams(max_tokens=1, prompt_logprobs=1, temperature=0.0)
@@ -161,8 +165,12 @@ class VLLMBackend(InferenceBackend):
             enforce_eager=cfg.get("enforce_eager", True),
             disable_log_stats=cfg.get("disable_log_stats", True),
         )
+        if "enable_chunked_prefill" in cfg:
+            llm_kwargs["enable_chunked_prefill"] = cfg["enable_chunked_prefill"]
         if cfg.get("quantization"):
             llm_kwargs["quantization"] = cfg["quantization"]
+        if cfg.get("allow_deprecated_quantization"):
+            llm_kwargs["allow_deprecated_quantization"] = True
         self._llm: LLM | None = LLM(**llm_kwargs)
         self._tokenizer = self._llm.get_tokenizer()
         self._workers: list[SpawnProcess] = []

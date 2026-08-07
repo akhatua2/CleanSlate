@@ -55,6 +55,7 @@ def run_remote(
         HF_CACHE,
         HF_SECRET,
         RUNS_VOLUME,
+        build_nemotron_training_image,
         build_training_image,
     )
 
@@ -64,7 +65,10 @@ def run_remote(
     gpu_type, _, gpu_count_str = gpu.partition(":")
     gpu_count = int(gpu_count_str) if gpu_count_str else 1
 
-    image = build_training_image()
+    if "nemotron" in config.model_name.lower():
+        image = build_nemotron_training_image()
+    else:
+        image = build_training_image()
     app = modal.App(_app_name(config), image=image)
 
     @app.function(

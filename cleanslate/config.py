@@ -30,7 +30,13 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "gpu_memory_utilization": 0.95,
         "max_model_len": 512,
         "dtype": "bfloat16",
-        "enforce_eager": False,
+        # enforce_eager=True forces vLLM into single-process mode (no separate
+        # worker), bypassing the ZMQ engine↔worker socket. Some vllm 0.19.x
+        # builds hit a tensor-shape mismatch (`shape '[N, 2]' is invalid for
+        # input of size M`) in `_decode_tensor` on the prompt-logprobs path
+        # under load; the crash is deterministic per cell. Eager mode avoids
+        # that path entirely. Costs ~30–50% throughput.
+        "enforce_eager": True,
     },
 }
 

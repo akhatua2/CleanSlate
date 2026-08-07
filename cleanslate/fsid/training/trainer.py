@@ -120,7 +120,46 @@ class CleanSlateUnlearnTrainer(Trainer):
             p.requires_grad = False
         ref = accelerator.prepare_model(ref, evaluation_mode=True)
         ref.eval()
+        # `accelerator.prepare_model(evaluation_mode=True)` skips FSDP wrapping, so
+        # under cpu_ram_efficient_loading + non-rank-0 zero-init the weights never
+        # migrate to CUDA — every rank then sees CPU tensors during forward.
+        # Force every rank's ref to its local CUDA device.
+        device = accelerator.device
+        ref = ref.to(device)
         return ref
+
+    @override
+    def save_model(self, output_dir: str | None = None, _internal_call: bool = False) -> None:
+        """Save model, bypassing HF Trainer's FSDP gather path which deadlocks on 8+ GPUs.
+
+        With FSDP full_shard the stock `trainer.save_model()` calls
+        `accelerator.get_state_dict()` which internally issues a blocking NCCL all-gather
+        inside a conditional — if any rank enters/exits the context at slightly different
+        times the gather never completes.  Using FSDP's own `state_dict_type` context
+        manager with `offload_to_cpu=True, rank0_only=True` is the canonical deadlock-safe
+        path: all ranks participate in the gather unconditionally, rank 0 receives the CPU
+        tensors, non-rank-0 ranks receive empty dicts.
+        """
+        import os
+        from torch.distributed.fsdp import (
+            FullStateDictConfig,
+            FullyShardedDataParallel as FSDP,
+            StateDictType,
+        )
+
+        out = output_dir or self.args.output_dir
+        os.makedirs(out, exist_ok=True)
+
+        if self.is_fsdp_enabled:
+            cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, cfg):
+                state_dict = self.model.state_dict()
+            if self.is_world_process_zero():
+                from safetensors.torch import save_file
+                save_file(state_dict, os.path.join(out, "model.safetensors"))
+                logger.info("Saved FSDP full state dict → %s/model.safetensors", out)
+        else:
+            super().save_model(output_dir, _internal_call)
 
     def _ensure_rmu_state(self, model: Any) -> None:
         """Materialize RMU state (module handles, control_vec) once."""
@@ -237,6 +276,17 @@ class CleanSlateUnlearnTrainer(Trainer):
                 return compute_undial_loss(
                     model, self.ref_model, f_ids, f_mask, f_labels, self.undial_beta
                 )
+            case "cpt":
+                # Continued pretraining: standard NLL on the "forget" stream (which here
+                # carries the corpus we want to memorize). No negation, no reference model.
+                outputs = model(
+                    input_ids=f_ids,
+                    attention_mask=f_mask,
+                    labels=f_labels,
+                    **_build_extra_inputs(model, f_ids),
+                )
+                cpt_loss: torch.Tensor = outputs.loss
+                return cpt_loss
             case obj:
                 raise ValueError(f"Unknown objective: {obj}")
 
@@ -368,6 +418,12 @@ def train_unlearning(config: TrainerConfig) -> dict[str, Any]:
     trainer.accelerator.wait_for_everyone()
     if trainer.is_world_process_zero():
         tokenizer.save_pretrained(training_args.output_dir)
+        # Copy HF model config files not saved by save_model() so the checkpoint
+        # is directly loadable by vLLM / from_pretrained without manual patching.
+        import shutil
+        from transformers import AutoConfig
+        base_cfg = AutoConfig.from_pretrained(config.model_name)
+        base_cfg.save_pretrained(training_args.output_dir)
         logger.info("Saved checkpoint to %s", training_args.output_dir)
 
     summary: dict[str, Any] = {
