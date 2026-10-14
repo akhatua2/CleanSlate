@@ -22,6 +22,7 @@ export default function Page() {
         <div className="links">
           <a href="https://arxiv.org/abs/2608.14855">[Paper]</a>
           <a href="https://huggingface.co/unlearning-cleanslate">[Data]</a>
+          <a href="https://github.com/akhatua2/CleanSlate">[Code]</a>
         </div>
       </header>
 
