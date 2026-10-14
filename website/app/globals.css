@@ -110,12 +110,12 @@ figure.viz figcaption b { color: var(--ink-1); font-weight: 600; }
 .badge.retain { color: var(--retain); background: var(--retain-soft); }
 
 /* reserve each figure's height while its data loads, so nothing below it jumps */
-.sl.ui { min-height: 966px; }
+.sl.ui { min-height: 882px; }
 .flame.ui { min-height: 754px; }
 .ow.ui { min-height: 507px; }
 .tm.ui { min-height: 669px; }
 @media (max-width: 640px) {
-  .sl.ui { min-height: 1156px; }
+  .sl.ui { min-height: 1055px; }
   .flame.ui { min-height: 1170px; }
   .ow.ui { min-height: 788px; }
   .tm.ui { min-height: 754px; }

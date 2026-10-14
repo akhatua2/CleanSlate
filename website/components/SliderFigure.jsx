@@ -30,27 +30,6 @@ function useTween(target, ms = 1100) {
   return v;
 }
 
-const WHEN = ["", "At 25%", "At 50%", "At 75%", "Done"];
-
-// One plain sentence about the current checkpoint, built from the numbers. It names a
-// well-extractable work nobody asked about that is (nearly) gone by now.
-function sentence(m, walls, stage, last, fE, rE) {
-  const total = walls.forget.length + walls.retain.length;
-  if (stage === 0) {
-    return `Before unlearning, ${m.name} can reproduce passages from ${total.toLocaleString()} songs and books. Drag to start.`;
-  }
-  // prefer a work that was lost at this step, so each stop names something new
-  const gone = (x, k) => x.n[k] <= 0.15 * x.n[0];
-  const cands = walls.retain.filter((x) => x.n[0] >= 15 && gone(x, stage)).sort((a, b) => b.n[0] - a.n[0]);
-  const hit = cands.find((x) => !gone(x, stage - 1)) ?? cands[0];
-  const ex = hit ? `, including ${hit.n[stage] === 0 ? "all" : "almost all"} of ${hit.t}` : "";
-  const f = fE >= 99.95 ? "the request is fully gone" : `${fE.toFixed(1)}% of the request is gone`;
-  const r = rE >= 99.5 && rE < 100 ? `almost all (${rE.toFixed(2)}%)` : `${rE.toFixed(1)}%`;
-  if (stage === last) {
-    return `${WHEN[stage]}: ${f}, and so is ${r} of everything else${ex}.`;
-  }
-  return `${WHEN[stage]}, ${f}, and ${r} of everything else${ex}.`;
-}
 
 const erasedPct = (tot, s) => (tot[0] ? 100 * (1 - tot[s] / tot[0]) : 0);
 
@@ -137,7 +116,6 @@ export default function SliderFigure() {
         </div>
       </div>
 
-      <p className="sl-say" aria-live="polite">{sentence(m, walls, stage, last, fE, rE)}</p>
 
       <div className={`sl-body${pick ? " open" : ""}`} ref={bodyRef}>
       <div className="sl-left">
