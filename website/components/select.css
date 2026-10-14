@@ -1,0 +1,17 @@
+.sel { position: relative; display: inline-block; }
+.sel-btn {
+  font: inherit; color: var(--ink-1); background: none; border: 0; padding: 0 2px; cursor: pointer;
+  display: inline-flex; align-items: baseline; gap: 6px;
+  border-bottom: 1.5px solid var(--ink-1);
+}
+.sel-btn svg { color: var(--ink-3); transform: translateY(-2px); }
+.sel-btn:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 2px; }
+.sel-menu {
+  position: absolute; left: -10px; top: calc(100% + 6px); z-index: 50; min-width: calc(100% + 20px);
+  list-style: none; margin: 0; padding: 4px 0; background: var(--paper); border: 1px solid var(--rule);
+  border-radius: 6px; box-shadow: 0 8px 24px rgba(20, 20, 20, 0.1);
+  font: inherit;
+}
+.sel-menu li { padding: 4px 12px; white-space: nowrap; cursor: pointer; color: var(--ink-2); }
+.sel-menu li.hi { background: var(--paper-2); color: var(--ink-1); }
+.sel-menu li.on { color: var(--ink-1); font-style: italic; }

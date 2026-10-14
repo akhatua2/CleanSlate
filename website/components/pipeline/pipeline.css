@@ -1,0 +1,194 @@
+/* CleanSlate overview figure. Paper card, neutral grey line, one lit part: the curator (scanner) you submit. */
+.pl.iso[data-theme="light"] {
+  --anatomy-card: var(--paper);
+  --anatomy-paper: var(--paper);
+  --anatomy-lit: var(--mem-5);
+  --anatomy-lit-top: var(--mem-1);
+  --anatomy-lit-shade: var(--mem-2);
+  --anatomy-face: #fff3f1;
+  --anatomy-strong: var(--ink-1);
+  --anatomy-text: var(--ink-2);
+  --anatomy-muted: var(--ink-3);
+  max-width: var(--wide);
+  margin: 0 auto;
+  overflow-x: clip;
+}
+.pl .iso-figure { margin: 12px 0 28px; }
+.pl .iso-plate { --anatomy-paper: var(--paper); padding: 40px 16px 20px; }
+.pl svg rect { vector-effect: non-scaling-stroke; }
+
+.pl-lede { max-width: var(--measure); margin: 0 auto; font-family: var(--sans); font-size: 17px; line-height: 1.5; color: var(--ink-1); text-wrap: pretty; }
+.pl-lede-mine { color: var(--mem-6); font-weight: 600; }
+
+/* materials and fine detail */
+.pl-slats { fill: none; stroke: var(--anatomy-faint); stroke-width: .4; }
+.pl-rivets circle, .pl-screws circle, .pl-screw { fill: var(--anatomy-mid); stroke: none; }
+.pl-tape { fill: none; stroke: #c9b98a; stroke-width: 1.2; vector-effect: none; }
+.pl-strap { fill: none; stroke: var(--anatomy-mid); stroke-width: .7; }
+.pl-mine-thin { stroke: var(--mem-4); stroke-width: .5; fill: none; }
+.pl-mine-panel { fill: #fff6f5; stroke: var(--mem-5); stroke-width: .5; }
+.pl-knob { fill: #fff; stroke: var(--mem-5); stroke-width: .5; }
+.pl-knob-tick { stroke: var(--mem-6); stroke-width: .5; }
+.pl-vent { stroke: var(--anatomy-mid); stroke-width: .6; stroke-linecap: round; fill: none; }
+.pl-bezel { fill: var(--mem-2); stroke: var(--mem-5); stroke-width: .5; }
+.pl-panel { fill: none; stroke: var(--anatomy-mid); stroke-width: .6; }
+.pl-chrome { fill: none; stroke: var(--anatomy-mid); stroke-width: .5; }
+.pl-arch-in { fill: var(--anatomy-shade-1); stroke: var(--anatomy-mid); stroke-width: .4; }
+.pl-bars { stroke: var(--anatomy-mid); stroke-width: .4; }
+.pl-plaque { font-family: var(--serif); font-style: italic; font-size: 1.7px; font-weight: 700; fill: var(--ink-1); }
+.pl-slot { fill: var(--ink-2); stroke: none; }
+.pl-card-ink { stroke: var(--ink-3); stroke-width: .25; }
+.pl-bezel-ring { fill: var(--anatomy-shade-2); stroke: var(--anatomy-mid); stroke-width: .5; }
+.pl-ticks { stroke: var(--ink-2); stroke-width: .4; }
+.pl-pivot-dot { fill: var(--ink-1); }
+
+.pl-front { fill: #fff; }
+.pl-inner .iso-shade, .pl-inner .iso-fill { fill: var(--anatomy-shade-0); }
+.pl-inner .iso-top { fill: var(--anatomy-shade-2); }
+.pl-dark .iso-top { fill: #7a7d85; }
+.pl-dark .iso-shade, .pl-dark .iso-fill { fill: var(--ink-2); }
+.pl-face-fill { fill: #fff; stroke: none; }
+.pl-chute .pl-face-fill { fill: var(--anatomy-shade-3); }
+.pl-roller { stroke: var(--anatomy-faint); stroke-width: .5; }
+.pl-mouth { fill: var(--anatomy-shade-0); stroke: var(--anatomy-mid); stroke-width: .6; }
+.pl-cavity { fill: var(--anatomy-shade-0); stroke: var(--anatomy-mid); stroke-width: .5; }
+.pl-curtain { stroke: var(--anatomy-mid); stroke-width: .6; }
+.pl-drawer { fill: none; stroke: var(--anatomy-mid); stroke-width: .6; }
+.pl-lamp { fill: var(--anatomy-shade-1); stroke: var(--anatomy-mid); stroke-width: .5; }
+
+/* request clipboard */
+.pl-sheet { fill: #fff; stroke: var(--anatomy-mid); stroke-width: .5; }
+.pl-rec { fill: var(--ink-2); stroke: none; }
+.pl-rec-dot { fill: #fff; }
+.pl-ruled { stroke: var(--ink-3); stroke-width: .8; }
+
+/* the curator */
+.pl-mine-mark { stroke: var(--mem-5); stroke-width: 1; fill: none; }
+.pl-led { fill: var(--mem-2); stroke: var(--mem-5); stroke-width: .5; }
+.pl[data-step="2"] .pl-led[data-led="0"] { animation: pl-blink 0.9s steps(1, end) infinite; }
+.pl[data-step="2"] .pl-led[data-led="1"] { animation: pl-blink 0.9s steps(1, end) infinite .45s; }
+@keyframes pl-blink { 0% { fill: var(--mem-5); } 50% { fill: var(--mem-1); } }
+.pl-screen { fill: var(--mem-1); stroke: var(--mem-5); stroke-width: .5; }
+.pl-xray, .pl-xray-l { fill: none; stroke: var(--mem-6); stroke-width: .6; }
+.pl-scanline { stroke: var(--mem-5); stroke-width: .9; opacity: .8; }
+
+/* trays and labels */
+.pl-plate { fill: var(--anatomy-shade-3); stroke: var(--anatomy-mid); stroke-width: .5; }
+.pl-plate-f { stroke: var(--mem-5); }
+.pl-engrave { font-family: var(--sans); font-size: 2.6px; font-weight: 700; fill: var(--ink-1); }
+.pl-engrave-s { font-size: 2.4px; font-weight: 600; fill: var(--ink-2); }
+.pl-sub { font-size: 1.8px; }
+.pl-theta { font-size: 2.6px; font-family: var(--serif); font-style: italic; }
+.pl-tag { fill: var(--mem-1); stroke: var(--mem-5); stroke-width: .7; }
+.pl-rim-f { fill: none; stroke: var(--mem-5); stroke-width: 1.1; stroke-linejoin: round; }
+.pl-wrong .iso-top { fill: #fff; }
+.pl-flip { fill: var(--anatomy-shade-1); stroke: var(--anatomy-hi); stroke-width: .7; }
+.pl-pivot-flip { fill: var(--anatomy-shade-2); stroke: var(--anatomy-hi); stroke-width: .7; }
+
+/* jukebox */
+.pl-window { fill: var(--anatomy-shade-1); stroke: var(--anatomy-mid); stroke-width: .5; }
+.pl-card { stroke: var(--anatomy-mid); stroke-width: .35; }
+.pl-card-blank { fill: #fff; stroke: var(--anatomy-lo); stroke-dasharray: .6 .5; }
+.pl-card-ink { stroke-width: .45; fill: none; }
+.pl-pin { fill: var(--ink-1); stroke: none; }
+.pl-button { fill: var(--anatomy-shade-2); stroke: var(--anatomy-mid); stroke-width: .4; }
+.pl-grille { fill: var(--anatomy-shade-1); stroke: var(--anatomy-mid); stroke-width: .4; }
+
+/* evaluation */
+.pl-cone { fill: var(--anatomy-shade-2); stroke: var(--anatomy-mid); stroke-width: .6; }
+.pl-cone-in { fill: var(--anatomy-shade-1); stroke: var(--anatomy-mid); stroke-width: .5; }
+.pl-cone-cap { fill: var(--ink-2); }
+.pl-gauge-face { fill: #fff; stroke: var(--anatomy-mid); stroke-width: .6; }
+.pl-target { stroke: var(--ink-1); stroke-width: 1.4; }
+.pl-needle { stroke: var(--ink-1); stroke-width: 1.1; }
+.pl-pivot { fill: var(--ink-1); }
+.pl-icon { fill: #fff; stroke: var(--ink-3); stroke-width: .5; }
+.pl-icon-dot { fill: var(--ink-3); }
+.pl-icon-l { stroke: var(--ink-3); stroke-width: .5; fill: none; }
+
+/* cables: a solid tube (dark outer stroke, pale core) with round caps; a bead travels along on its step */
+.pl .pl-cable path { fill: none; vector-effect: none; stroke-linecap: round; stroke-linejoin: round; }
+.pl-cable-o { stroke: var(--anatomy-mid); stroke-width: 1.5; }
+.pl-cable-i { stroke: var(--anatomy-shade-2); stroke-width: .8; }
+.pl-cable-bead { stroke: transparent; stroke-width: 1.6; stroke-dasharray: 0.01 calc(var(--len) * 1px + 20px); }
+.pl[data-step="1"] [data-cable="req"] .pl-cable-bead,
+.pl[data-step="2"] [data-cable="req"] .pl-cable-bead,
+.pl[data-step="5"] [data-cable="score"] .pl-cable-bead { stroke: var(--ink-1); animation: pl-bead 1.6s linear infinite; }
+@keyframes pl-bead { from { stroke-dashoffset: 0; } to { stroke-dashoffset: calc(var(--len) * -1px); } }
+
+/* the active station: darker edges and a filled badge; cables carry a signal on their steps */
+.pl .iso-edge, .pl .iso-line { transition: stroke 300ms var(--anatomy-ease); }
+.pl[data-step="1"] [data-st="1"] .iso-edge,
+.pl[data-step="3"] [data-st="3"] .iso-edge,
+.pl[data-step="4"] [data-st="4"] .iso-edge,
+.pl[data-step="5"] [data-st="5"] .iso-edge { stroke: var(--anatomy-hi); }
+
+/* station tags and small captions (HTML over the drawing, positioned from world points) */
+.pl-stage { position: relative; }
+.pl-labels { position: absolute; inset: 0; pointer-events: none; }
+.pl-tagl {
+  position: absolute; transform: translate(-50%, -100%); white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px 2px 3px;
+  font-family: var(--sans); font-size: 12.5px; font-weight: 600; line-height: 18px; color: var(--ink-1);
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 999px;
+  transition: background 200ms, color 200ms, border-color 200ms;
+}
+.pl-tagl b { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--ink-3); font-size: 11px; font-weight: 700; }
+.pl-tagl[data-tag="2"] { color: var(--mem-6); border-color: var(--mem-4); }
+.pl-tagl[data-tag="2"] b { border-color: var(--mem-5); }
+.pl[data-step="1"] .pl-tagl[data-tag="1"], .pl[data-step="3"] .pl-tagl[data-tag="3"], .pl[data-step="4"] .pl-tagl[data-tag="4"], .pl[data-step="5"] .pl-tagl[data-tag="5"] { background: var(--ink-1); color: var(--paper); border-color: var(--ink-1); }
+.pl[data-step="1"] .pl-tagl[data-tag="1"] b, .pl[data-step="3"] .pl-tagl[data-tag="3"] b, .pl[data-step="4"] .pl-tagl[data-tag="4"] b, .pl[data-step="5"] .pl-tagl[data-tag="5"] b { border-color: var(--paper); }
+.pl[data-step="2"] .pl-tagl[data-tag="2"] { background: var(--mem-5); color: #fff; border-color: var(--mem-5); }
+.pl[data-step="2"] .pl-tagl[data-tag="2"] b { border-color: #fff; }
+.pl-note { position: absolute; transform: translate(-50%, 0); white-space: nowrap; font-family: var(--sans); font-size: 11px; line-height: 1.2; color: var(--ink-3); }
+.pl-note-dial { white-space: normal; width: 44px; text-align: center; font-size: 10px; }
+
+/* wide vs phone framing (both are rendered; CSS picks one, so nothing shifts) */
+.pl-narrow { display: none; }
+.pl-rowv .iso-svg { overflow: hidden; }
+.pl-narrow .pl-rowv + .pl-rowv { margin-top: 18px; }
+
+/* below the card */
+.pl-below { font-family: var(--sans); margin-top: 14px; }
+.pl-steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.pl-steps button {
+  font: inherit; display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 48px; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 8px;
+  background: var(--paper); color: var(--ink-2); cursor: pointer; font-size: 15px;
+  transition: background 200ms, color 200ms, border-color 200ms;
+}
+.pl-step-n {
+  display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid var(--ink-3); font-size: 12px; font-weight: 600; flex: none;
+}
+.pl-steps button[data-step-button="2"] .pl-step-n { border-color: var(--mem-5); color: var(--mem-6); }
+.pl-steps button[aria-current="step"] { background: var(--ink-1); border-color: var(--ink-1); color: var(--paper); }
+.pl-steps button[aria-current="step"] .pl-step-n { border-color: var(--paper); color: var(--paper); }
+.pl-steps button[data-step-button="2"][aria-current="step"] { background: var(--mem-5); border-color: var(--mem-5); }
+.pl-steps button:focus-visible { outline: 2px solid var(--cor-5); outline-offset: 2px; }
+.pl-sentence sub { font-size: .7em; }
+.pl-sentence { margin: 14px 0 0; min-height: 3em; font-size: 17px; line-height: 1.5; color: var(--ink-1); text-wrap: pretty; }
+.pl-keys { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 10px; font-size: 13px; color: var(--ink-3); }
+.pl-key { display: inline-flex; align-items: center; gap: 7px; }
+.pl-sw { display: inline-block; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--anatomy-mid); background: #fff; }
+.pl-sw[data-sw="mine"] { background: var(--mem-1); border-color: var(--mem-5); }
+.pl-sw[data-sw="tag"] { background: #fff; border-color: var(--mem-5); border-width: 1px 1px 1px 4px; }
+.pl-sw[data-sw="dark"] { background: var(--ink-2); border-color: var(--ink-1); }
+
+@media (max-width: 640px) {
+  .pl-tagl { font-size: 11px; line-height: 15px; padding: 1px 7px 1px 2px; gap: 4px; }
+  .pl-tagl b { width: 15px; height: 15px; font-size: 10px; }
+  .pl-note { font-size: 9.5px; }
+  .pl-note-dial { display: none; }
+  .pl-wide { display: none; }
+  .pl-narrow { display: block; }
+  .pl .iso-plate { padding: 34px 4px 12px; }
+  .pl-lede, .pl-sentence { font-size: 16px; }
+  .pl-sentence { min-height: 6em; }
+  .pl-steps { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 6px; padding-bottom: 4px; scrollbar-width: none; overscroll-behavior-x: contain; }
+  .pl-steps::-webkit-scrollbar { display: none; }
+  .pl-steps button { flex: 0 0 auto; min-width: 104px; min-height: 48px; scroll-snap-align: start; font-size: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pl *, .pl *::before { transition: none !important; animation: none !important; }
+}

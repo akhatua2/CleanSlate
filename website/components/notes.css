@@ -1,0 +1,53 @@
+/* note marks: a small raised number, quiet until hovered */
+.nm {
+  font: 600 11px var(--sans); color: var(--link); background: none; border: 0; padding: 0 1px; margin: 0 1px 0 0;
+  vertical-align: super; line-height: 0; cursor: pointer;
+}
+.nm:hover, .nm.on { text-decoration: underline; text-underline-offset: 2px; }
+
+/* the note: in the right margin when there is room… */
+.sidenote {
+  float: right; clear: right; width: 220px; margin: 0.3em -260px 0 0;
+  font: 13px/1.5 var(--sans); color: var(--ink-2);
+}
+.sidenote .sn-n { font-weight: 600; color: var(--ink-3); margin-right: 2px; }
+/* …and opened in place by a tap when there isn't */
+@media (max-width: 1220px) {
+  .sidenote { display: none; float: none; width: auto; margin: 0; }
+  .sidenote.open {
+    display: block; margin: 10px 0 14px; padding: 10px 12px; background: var(--paper-2); border-radius: 6px;
+  }
+}
+
+/* citations */
+.cite { font: 13px var(--sans); color: var(--ink-3); white-space: nowrap; }
+.cite-a { color: var(--link); text-decoration: none; position: relative; }
+.cite-a:hover { text-decoration: underline; }
+.cite-a[data-tip]:hover::after {
+  content: attr(data-tip); position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); z-index: 20;
+  width: 280px; white-space: normal; padding: 8px 10px; border-radius: 6px; background: var(--ink-1); color: var(--paper);
+  font: 12px/1.45 var(--sans); pointer-events: none;
+}
+
+/* references */
+.refs { font: 14px/1.5 var(--sans); color: var(--ink-1); padding-left: 1.4em; margin: 12px 0 0; }
+.refs li { margin-bottom: 8px; }
+.refs li:target { background: var(--paper-2); }
+.refs a { color: var(--ink-1); text-decoration-color: var(--rule); }
+.refs .by { color: var(--ink-3); }
+.bibtex { font: 12.5px/1.55 var(--mono); background: var(--paper-2); border-radius: 6px; padding: 14px 16px; overflow-x: auto; color: var(--ink-2); white-space: pre; }
+.divider { text-align: center; color: var(--ink-3); margin: 64px 0 8px; letter-spacing: .4em; }
+.findings { margin: 0 0 20px; }
+.ask { background: #fff7d6; padding: 2px 4px; border-radius: 3px; font-style: italic; }
+.prose h3 { font-size: var(--fs-h3); font-weight: 500; line-height: 1.3; margin: 36px 0 10px; }
+.prose > .refs, .prose > .bibtex { margin-bottom: 24px; }
+/* display math */
+.eq { text-align: center; font: 21px/1.4 var(--serif); color: var(--ink-1); margin: 4px 0 22px; overflow-x: auto; white-space: nowrap; }
+.eq sub, .eq sup { font-size: 0.68em; }
+.eq .big { font-size: 1.45em; vertical-align: -0.12em; margin-right: 1px; }
+.eq .lim { font-size: 0.6em; }
+@media (max-width: 600px) { .eq { font-size: 17px; } }
+.eq .op { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; line-height: 1; margin: 0 4px; }
+.eq .op .big { font-size: 1.6em; line-height: .9; margin: 0; vertical-align: 0; }
+.eq .op .lim { font-size: .55em; }
+.prose sup, .prose sub { line-height: 0; }

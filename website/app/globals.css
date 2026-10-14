@@ -1,0 +1,173 @@
+/* CleanSlate design tokens.
+   Two colour meanings, never mixed:
+     memory (red) = model memory (extraction probability p_z)
+     ink   = corpus presence (how often text appears in training data)
+   Requested (forget) vs. not-requested (retain) works use teal vs. violet. */
+
+
+:root {
+  color-scheme: light;
+  --paper: #fbfaf6;
+  --paper-2: #f3f1ea;
+  --rule: #e2dfd5;
+  --ink-1: #16171a;
+  --ink-2: #4f525a;
+  --ink-3: #8b8e96;
+  --link: #1f5f8b;
+
+  /* redacted (unextractable) word block */
+  --blank: #e6e3da;
+  --blank-hover: #d3cfc3;
+
+  /* memory (red): p_z from 1e-3 (light) to 1 (dark) */
+  --mem-1: #ffe5e3;
+  --mem-2: #ffc4bf;
+  --mem-3: #ff9a91;
+  --mem-4: #f8695d;
+  --mem-5: #ea4335;
+  --mem-6: #d62a1f;
+  --mem-7: #b8160d;
+
+  /* erased (green): was extractable before unlearning, not after; shade = p_z before */
+  --gone-1: #e4f6e8;
+  --gone-2: #c3ebcc;
+  --gone-3: #93d9a4;
+  --gone-4: #5cc27a;
+  --gone-5: #2ea85a;
+  --gone-6: #1d8a45;
+  --gone-7: #146b35;
+
+  /* corpus (blue): how many training documents contain this text, low to high */
+  --cor-1: #e6effa;
+  --cor-2: #c7dbf3;
+  --cor-3: #9fc1ea;
+  --cor-4: #6ea0dc;
+  --cor-5: #3f7cc9;
+  --cor-6: #255aa0;
+
+  --forget: #0f7a6c;
+  --forget-soft: #d5ede8;
+  --retain: #5b48b5;
+  --retain-soft: #e5e1f6;
+
+  /* font families come from next/font (layout.js), which sizes the fallbacks to avoid layout shift */
+  --serif: var(--font-serif), Georgia, serif;
+  --sans: var(--font-sans), system-ui, sans-serif;
+  --mono: var(--font-mono), ui-monospace, monospace;
+
+  --measure: 680px;
+  --wide: 680px; /* figures sit within the text column */
+}
+
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink-1);
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1.6;
+  font-optical-sizing: auto;
+}
+a { color: var(--link); text-underline-offset: 2px; }
+
+.page { padding: 0 16px 120px; }
+.prose { max-width: var(--measure); margin: 0 auto; }
+.wide { max-width: var(--wide); margin: 0 auto; }
+
+header.hero { max-width: var(--measure); margin: 0 auto; padding: 88px 0 24px; }
+header.hero h1 { font-weight: 500; font-size: 40px; line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.01em; }
+header.hero .authors { font-family: var(--sans); font-size: 15px; color: var(--ink-2); }
+header.hero .links { font-family: var(--mono); font-size: 14px; margin-top: 10px; display: flex; gap: 16px; }
+
+h2 { font-weight: 500; font-size: 28px; margin: 72px 0 12px; }
+h2 .num { color: var(--ink-3); font-family: var(--mono); font-size: 18px; margin-right: 10px; }
+p { margin: 0 0 18px; }
+
+/* inline token chips (like Sophie's), but for our literal text */
+.chip { font-family: var(--mono); font-size: 0.82em; border: 1px solid var(--rule); background: var(--paper-2); padding: 0 4px; border-radius: 3px; }
+
+figure.viz { margin: 36px auto 40px; }
+figure.viz figcaption { max-width: var(--measure); margin: 14px auto 0; font-family: var(--sans); font-size: 14px; color: var(--ink-2); line-height: 1.5; }
+figure.viz figcaption b { color: var(--ink-1); font-weight: 600; }
+
+/* shared figure UI */
+.ui { font-family: var(--sans); font-size: 13px; color: var(--ink-2); }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button { font: inherit; border: 0; background: transparent; color: var(--ink-2); padding: 5px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink-1); color: var(--paper); }
+.tooltip {
+  position: fixed; pointer-events: none; z-index: 20; opacity: 0;
+  background: var(--ink-1); color: var(--paper); font-family: var(--sans); font-size: 12px; line-height: 1.4;
+  padding: 7px 9px; border-radius: 5px; max-width: 260px; transition: opacity 80ms;
+}
+.tooltip .k { color: var(--ink-3); }
+.badge { font-family: var(--sans); font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 10px; letter-spacing: 0.02em; }
+.badge.forget { color: var(--forget); background: var(--forget-soft); }
+.badge.retain { color: var(--retain); background: var(--retain-soft); }
+
+/* reserve each figure's height while its data loads, so nothing below it jumps */
+.sl.ui { min-height: 966px; }
+.flame.ui { min-height: 754px; }
+.ow.ui { min-height: 507px; }
+.tm.ui { min-height: 669px; }
+@media (max-width: 640px) {
+  .sl.ui { min-height: 1156px; }
+  .flame.ui { min-height: 1170px; }
+  .ow.ui { min-height: 788px; }
+  .tm.ui { min-height: 754px; }
+}
+
+/* figures adapt to the column, not the screen */
+figure.viz { container-type: inline-size; max-width: var(--measure); }
+
+/* ───────── type scale: one hierarchy for prose and figures ─────────
+   display 46 · section 30 · figure title 22 · lead 21 · body 19 · ui 14 · caption 14 · small 12.5 */
+:root {
+  --fs-display: 46px; --fs-h2: 30px; --fs-h3: 22px; --fs-lead: 21px; --fs-body: 19px;
+  --fs-ui: 14px; --fs-cap: 14px; --fs-small: 12.5px;
+}
+@media (max-width: 640px) {
+  :root { --fs-display: 34px; --fs-h2: 25px; --fs-h3: 19px; --fs-lead: 18.5px; --fs-body: 17.5px; --fs-ui: 13.5px; --fs-cap: 13px; }
+}
+body { font-size: var(--fs-body); line-height: 1.62; }
+header.hero { padding: 96px 0 8px; }
+header.hero h1 { font-size: var(--fs-display); line-height: 1.08; letter-spacing: -0.018em; font-weight: 500; margin: 0 0 16px; }
+header.hero .authors { font-size: var(--fs-ui); }
+header.hero .links { font-size: 13px; margin-top: 8px; }
+h2 { font-size: var(--fs-h2); line-height: 1.2; letter-spacing: -0.01em; margin: 96px 0 16px; }
+h2 .num { font: 500 15px var(--sans); color: var(--ink-3); vertical-align: 0.35em; margin-right: 12px; }
+.prose p { margin: 0 0 20px; }
+
+/* tl;dr: a lead paragraph, no box */
+.tldr { font-size: var(--fs-lead); line-height: 1.5; color: var(--ink-1); margin: 28px 0 8px; }
+.tldr b:first-child {
+  display: block; font: 600 12.5px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 6px;
+}
+
+/* figures: titles in serif at --fs-h3, all UI text in sans at --fs-ui, notes at --fs-small */
+figure.viz { margin: 44px auto 56px; }
+figure.viz figcaption { font-size: var(--fs-cap); line-height: 1.55; margin-top: 18px; }
+.page .ui { font-size: var(--fs-ui); }
+.page .dr-q, .page .sl-ask, .page .sl-say, .page .tm-say, .page .pu-say { font-family: var(--serif); font-size: var(--fs-h3); line-height: 1.4; font-weight: 400; }
+.page .dr-q { font-weight: 500; margin-bottom: 14px; }
+.page .bm-kick, .page .fx-name { font: 500 var(--fs-ui) var(--sans); color: var(--ink-2); font-style: normal; }
+.page .bm-kick.red { color: var(--mem-6); }
+.page .bm-card .h, .page .bm-steps .st .h { font-size: var(--fs-ui); }
+.page .bm-card .s, .page .run-head { font-size: var(--fs-ui); }
+.page .dr-sub, .page .fx-key, .page .fx-note, .page .sl-legend, .page .ow-legend, .page .dr-src, .page .flame-legend { font-size: var(--fs-small); }
+.page .sl-wall header .h, .page .ow-label { font-size: 16px; }
+.page .sl-big .num { font-size: 34px; }
+.page .tabs button { font-size: 16px; }
+
+/* justified body text, hyphenated so narrow columns don't open rivers */
+.prose p, .prose .tldr { text-align: justify; hyphens: auto; -webkit-hyphens: auto; hyphenate-limit-chars: 7 3 3; text-wrap: pretty; }
+.prose .sidenote { text-align: left; hyphens: manual; }
+/* no orphans: headings and figure titles split into even lines, everything else avoids a lone last word */
+h1, h2, h3, .page .dr-q, .page .sl-ask, .page .sl-say, .page .tm-say, .page .pu-say { text-wrap: balance; }
+p, li, figcaption, .bm-card .s, .sc-k, .sidenote, .dr-sub, .fx-key { text-wrap: pretty; }
+/* phones: too few words per line to justify without gaps */
+@media (max-width: 600px) { .prose p, .prose .tldr { text-align: left; } }
